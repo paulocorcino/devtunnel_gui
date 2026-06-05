@@ -1,48 +1,48 @@
-# Rust + CLI para management, SDK nativo para hospedagem
+# Rust + CLI for management, native SDK for hosting
 
 ## Status
-accepted — **confirmado** pelo spike #2 (2026-06-05): o SDK hospeda em processo
-end-to-end (ver [docs/spikes/0001-sdk-hosting.md](../spikes/0001-sdk-hosting.md)).
-A hospedagem fica atrás de um trait `TunnelHost`, deixando `devtunnel host` como
-fallback barato caso a manutenção (token refresh / build OpenSSL) incomode.
+accepted — **confirmed** by spike #2 (2026-06-05): the SDK hosts in-process
+end-to-end (see [docs/spikes/0001-sdk-hosting.md](../spikes/0001-sdk-hosting.md)).
+Hosting is placed behind a `TunnelHost` trait, leaving `devtunnel host` as a cheap
+fallback if maintenance (token refresh / OpenSSL build) becomes too costly.
 
-## Decisão
+## Decision
 
-O app é escrito em **Rust** e divide a integração com o Microsoft Dev Tunnels em
-duas camadas: operações de **management de conta** (create/list/delete/port/access/
-update/renew) são feitas chamando o binário `devtunnel.exe` como **subprocesso
-one-shot** (`std::process::Command`, com saída `-j/--json`); a **hospedagem** de
-longa duração (keep-alive) usa o **SDK Rust oficial `tunnels`** (feature
-`connections`) rodando **em processo**, autorizado por um token host-scoped emitido
-com `devtunnel token <id> --scopes host`.
+The app is written in **Rust** and splits the Microsoft Dev Tunnels integration into
+two layers: **account management** operations (create/list/delete/port/access/
+update/renew) are done by calling the `devtunnel.exe` binary as a **one-shot
+subprocess** (`std::process::Command`, with `-j/--json` output); **long-running
+hosting** (keep-alive) uses the **official Rust `tunnels` SDK** (feature
+`connections`) running **in-process**, authorized by a host-scoped token minted with
+`devtunnel token <id> --scopes host`.
 
-## Contexto e motivação
+## Context and motivation
 
-O objetivo é um app de tray que mantenha URLs públicas vivas de forma confiável, com
-experiência próxima a soluções pagas, sem PowerShell e sem overengineering. A dor do
-script atual (PowerShell) é a hospedagem: disparar `devtunnel host` como processo
-externo e raspar a URL do stdout, um processo por porta.
+The goal is a tray app that keeps public URLs reliably alive, with an experience close
+to paid solutions, without PowerShell and without over-engineering. The pain of the
+current script (PowerShell) is hosting: launching `devtunnel host` as an external
+process and scraping the URL from stdout, one process per port.
 
 ## Considered Options
 
-- **Go:** descartado — o SDK oficial em Go tem Management API mas **não** tem Tunnel
-  Host Connections; não consegue hospedar em processo, que é justamente o ganho-chave.
-- **SDK nativo puro (inclusive auth):** mais elegante, mas o serviço Dev Tunnels é
-  first-party da Microsoft; obter token de usuário (nível conta) exigiria ou ler o
-  cache não-documentado do keychain, ou auto-registrar um app OAuth cujo escopo
-  first-party pode **não ser concedido**. Risco alto para o caso comum (criar/listar).
-- **CLI/PowerShell puro (status quo):** mantém a dor de N processos `devtunnel host`
-  de longa duração + scraping de URL; é o que estamos saindo.
+- **Go:** ruled out — the official Go SDK has Management API but **no** Tunnel Host
+  Connections; it cannot host in-process, which is the key benefit.
+- **Pure native SDK (including auth):** more elegant, but the Dev Tunnels service is
+  Microsoft first-party; obtaining a user (account-level) token would require either
+  reading an undocumented keychain cache, or self-registering an OAuth app whose
+  first-party scope may **not be granted**. High risk for the common case (create/list).
+- **Pure CLI/PowerShell (status quo):** keeps the pain of N long-running `devtunnel host`
+  processes + URL scraping; this is what we are moving away from.
 
 ## Consequences
 
-- O nativo (SDK) fica concentrado onde dá retorno: hospedagem em processo, uma
-  conexão de host por grupo, sem scraping de stdout.
-- Depende do `devtunnel.exe` instalado e logado. O token de login do CLI vale só
-  alguns dias → existe um teto natural de keep-alive; o app trata isso com um estado
-  explícito de **re-login** (ver CONTEXT.md).
-- O SDK `tunnels` é v0.1.0 (preview, ativo em 2026) — risco de maturidade na camada
-  de hospedagem; a camada de hospedagem deve ficar isolada atrás de uma interface
-  para permitir fallback a `devtunnel host` se necessário.
-- Token host-scoped tem vida limitada; keep-alive longo pode exigir re-emissão
-  periódica + reconexão.
+- Native (SDK) code is concentrated where it delivers value: in-process hosting, one
+  host connection per group, no stdout scraping.
+- Depends on `devtunnel.exe` installed and logged in. The CLI login token is valid for
+  only a few days → there is a natural keep-alive ceiling; the app handles this with an
+  explicit **re-login** state (see CONTEXT.md).
+- The `tunnels` SDK is v0.1.0 (preview, active in 2026) — maturity risk in the hosting
+  layer; the hosting layer must stay isolated behind an interface to allow fallback to
+  `devtunnel host` if needed.
+- Host-scoped token has a limited lifetime; long-running keep-alive may require periodic
+  re-minting + reconnect.

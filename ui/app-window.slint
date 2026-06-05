@@ -1,18 +1,20 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+export { Strings }
 
-// Uma linha = uma porta de um grupo (túnel), com sua Public URL.
+// One row = one port of a group (tunnel), with its Public URL.
 export struct PortRow {
-    group: string,     // nome amigável do grupo (cai para o tunnel-id)
-    tunnel-id: string, // Real Tunnel ID (chave estável do serviço)
+    group: string,     // friendly group name (falls back to tunnel-id)
+    tunnel-id: string, // Real Tunnel ID (stable service key)
     port: int,
     protocol: string,
     url: string,
     expiration: string,
-    status: string, // "idle" | "ok" | "warn" | "down" | "host"  (ver theme.slint)
+    status: string, // "idle" | "ok" | "warn" | "down" | "host"  (see theme.slint)
 }
 
-// Ponto de status colorido pelo estado.
+// Status dot colored by state.
 component StatusDot inherits Rectangle {
     in property <string> status: "idle";
     width: 9px;
@@ -21,7 +23,7 @@ component StatusDot inherits Rectangle {
     background: Theme.status-color(root.status);
 }
 
-// Chip pequeno (protocolo, expiração).
+// Small chip (protocol, expiration).
 component Pill inherits Rectangle {
     in property <string> text;
     background: Theme.surface;
@@ -41,7 +43,7 @@ component Pill inherits Rectangle {
     }
 }
 
-// Botão de texto temático (primary filled / ghost outline).
+// Themed text button (primary filled / ghost outline).
 component TxtButton inherits Rectangle {
     in property <string> text;
     in property <bool> primary: false;
@@ -84,7 +86,7 @@ export component AppWindow inherits Window {
     background: Theme.bg;
 
     in property <[PortRow]> rows;
-    in property <string> status: "carregando…";
+    in property <string> status: Strings.status-loading;
 
     callback refresh();
     callback copy-url(string);
@@ -109,7 +111,7 @@ export component AppWindow inherits Window {
                 Rectangle { horizontal-stretch: 1; }
                 Pill { text: root.status; }
                 TxtButton {
-                    text: "Atualizar";
+                    text: Strings.btn-refresh;
                     primary: true;
                     clicked => {
                         root.refresh();
@@ -119,7 +121,7 @@ export component AppWindow inherits Window {
         }
         Rectangle { height: 1px; background: Theme.border; }
 
-        // ---- Lista ----
+        // ---- List ----
         ListView {
             for row in root.rows : Rectangle {
                 height: 56px;
@@ -137,7 +139,7 @@ export component AppWindow inherits Window {
                         StatusDot { status: row.status; }
                     }
 
-                    // porta + url + meta
+                    // port + url + meta
                     VerticalLayout {
                         spacing: 2px;
                         alignment: center;
@@ -152,7 +154,7 @@ export component AppWindow inherits Window {
                             }
                             Pill { text: row.protocol == "" ? "—" : row.protocol; }
                             Text {
-                                text: row.url == "" ? "(sem URL — porta não configurada)" : row.url;
+                                text: row.url == "" ? Strings.no-url : row.url;
                                 color: row.url == "" ? Theme.muted : Theme.accent;
                                 font-size: Theme.fs-body;
                                 font-family: Theme.mono;
@@ -162,8 +164,8 @@ export component AppWindow inherits Window {
                         }
                         Text {
                             text: row.group == row.tunnel-id
-                                ? "\{row.tunnel-id} · expira: \{row.expiration}"
-                                : "\{row.group} (\{row.tunnel-id}) · expira: \{row.expiration}";
+                                ? "\{row.tunnel-id} · \{Strings.expires-label}: \{row.expiration}"
+                                : "\{row.group} (\{row.tunnel-id}) · \{Strings.expires-label}: \{row.expiration}";
                             color: Theme.muted;
                             font-size: Theme.fs-caption;
                         }
@@ -176,14 +178,14 @@ export component AppWindow inherits Window {
                         HorizontalLayout {
                             spacing: 6px;
                             TxtButton {
-                                text: "Copiar";
+                                text: Strings.btn-copy;
                                 enabled: row.url != "";
                                 clicked => {
                                     root.copy-url(row.url);
                                 }
                             }
                             TxtButton {
-                                text: "Abrir";
+                                text: Strings.btn-open;
                                 enabled: row.url != "";
                                 clicked => {
                                     root.open-url(row.url);

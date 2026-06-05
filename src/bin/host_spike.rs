@@ -1,18 +1,18 @@
-//! Spike #2 (HITL): valida se o SDK `tunnels` hospeda um túnel em processo.
+//! Spike #2 (HITL): validates whether the `tunnels` SDK can host a tunnel in-process.
 //!
-//! Fluxo:
-//!   1. Emite um host token via `devtunnel token <id> --scopes host -j` (subprocesso).
-//!   2. Sobe um servidor HTTP local mínimo na porta (algo para encaminhar).
-//!   3. Constrói o TunnelManagementClient (auth anônima) + RelayTunnelHost.
-//!   4. connect(host_token) + add_port(porta) → hospeda em processo.
-//!   5. Mantém vivo por ~120s para validação externa (curl na Public URL).
+//! Flow:
+//!   1. Mint a host token via `devtunnel token <id> --scopes host -j` (subprocess).
+//!   2. Start a minimal local HTTP server on the given port (something to forward).
+//!   3. Build a TunnelManagementClient (anonymous auth) + RelayTunnelHost.
+//!   4. connect(host_token) + add_port(port) → hosting in-process.
+//!   5. Keep alive for ~120s for external validation (curl the Public URL).
 //!
-//! Uso:
-//!   cargo run --features spike --bin host_spike -- <tunnel-id.cluster> <porta>
+//! Usage:
+//!   cargo run --features spike --bin host_spike -- <tunnel-id.cluster> <port>
 //!   (defaults: paulo-desktop-diad0dn-3000.brs 3000)
 //!
-//! A porta já deve existir no túnel (criada via CLI): add_port trata 409 como OK,
-//! então não precisamos de token de management aqui — só do host token.
+//! The port must already exist on the tunnel (created via CLI): add_port treats 409
+//! as OK, so no management token is needed here — only the host token.
 
 use std::process::Command;
 use std::time::Duration;
@@ -30,16 +30,16 @@ fn devtunnel_bin() -> String {
 }
 
 /// `devtunnel token <id> --scopes <scope> -j` → token string.
-/// Mintamos um escopo por vez: repetir `--scopes` no CLI corrompe o 1º valor
-/// (vira "shost"). Precisamos de dois tokens: `host` (conectar ao relay) e
-/// `manage:ports` (o SDK chama create_tunnel_port em add_port → 401 sem auth).
+/// Mint one scope at a time: repeating `--scopes` on the CLI corrupts the first value
+/// (becomes "shost"). Two tokens are needed: `host` (connect to relay) and
+/// `manage:ports` (SDK calls create_tunnel_port in add_port → 401 without auth).
 fn mint_token(full_id: &str, scope: &str) -> anyhow::Result<String> {
     let out = Command::new(devtunnel_bin())
         .args(["token", full_id, "--scopes", scope, "-j"])
         .output()?;
     if !out.status.success() {
         anyhow::bail!(
-            "devtunnel token ({scope}) falhou: {}",
+            "devtunnel token ({scope}) failed: {}",
             String::from_utf8_lossy(&out.stderr)
         );
     }
@@ -47,10 +47,10 @@ fn mint_token(full_id: &str, scope: &str) -> anyhow::Result<String> {
     v.get("token")
         .and_then(|t| t.as_str())
         .map(|s| s.to_string())
-        .ok_or_else(|| anyhow::anyhow!("campo 'token' ausente na saída de devtunnel token"))
+        .ok_or_else(|| anyhow::anyhow!("'token' field missing from devtunnel token output"))
 }
 
-/// Busca a Public URL real (portUri) da porta via `devtunnel show <id> -j`.
+/// Fetches the real Public URL (portUri) for the port via `devtunnel show <id> -j`.
 fn fetch_port_uri(full_id: &str, port: u16) -> Option<String> {
     let out = Command::new(devtunnel_bin())
         .args(["show", full_id, "-j"])
@@ -69,13 +69,13 @@ fn fetch_port_uri(full_id: &str, port: u16) -> Option<String> {
     None
 }
 
-/// Servidor HTTP local mínimo: responde 200 com um marcador conhecido.
+/// Minimal local HTTP server: responds 200 with a known marker.
 async fn run_local_server(port: u16) -> anyhow::Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
-    log::info!("servidor local de teste ouvindo em 127.0.0.1:{port}");
+    log::info!("local test server listening on 127.0.0.1:{port}");
     loop {
         let (mut sock, _) = listener.accept().await?;
         tokio::spawn(async move {
@@ -106,18 +106,18 @@ async fn main() -> anyhow::Result<()> {
         .and_then(|s| s.parse().ok())
         .unwrap_or(3000);
 
-    // Separa id e cluster no último ponto (ex.: "...-3000.brs" → id, "brs").
+    // Split id and cluster at the last dot (e.g. "...-3000.brs" → id, "brs").
     let (id, cluster) = full_id
         .rsplit_once('.')
         .map(|(i, c)| (i.to_string(), c.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("tunnel id sem cluster (esperado 'id.cluster'): {full_id}"))?;
+        .ok_or_else(|| anyhow::anyhow!("tunnel id has no cluster (expected 'id.cluster'): {full_id}"))?;
 
-    println!("== Spike de hospedagem via SDK ==");
+    println!("== SDK hosting spike ==");
     println!("tunnel id : {id}");
     println!("cluster   : {cluster}");
-    println!("porta     : {port}");
+    println!("port      : {port}");
 
-    // 1) tokens (um escopo por vez)
+    // 1) tokens (one scope at a time)
     let host_token = mint_token(&full_id, "host")?;
     let manage_token = mint_token(&full_id, "manage:ports")?;
     println!(
@@ -126,26 +126,26 @@ async fn main() -> anyhow::Result<()> {
         manage_token.len()
     );
 
-    // 2) servidor local
+    // 2) local server
     tokio::spawn(async move {
         if let Err(e) = run_local_server(port).await {
-            log::error!("servidor local falhou: {e}");
+            log::error!("local server failed: {e}");
         }
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // 3) management client autorizado com o token manage:ports,
-    //    para que add_port → create_tunnel_port não tome 401.
+    // 3) management client authorized with the manage:ports token so that
+    //    add_port → create_tunnel_port does not return 401.
     let mut builder = new_tunnel_management("devtunnel-gui-spike/0.1");
     builder.authorization(Authorization::Tunnel(manage_token));
     let mgmt: TunnelManagementClient = builder.into();
     let locator = TunnelLocator::ID { cluster, id };
 
-    // 4) hospeda
+    // 4) host
     let mut host = RelayTunnelHost::new(locator, mgmt);
-    println!("conectando ao relay…");
+    println!("connecting to relay…");
     let handle = host.connect(&host_token).await?;
-    println!("relay conectado ✓");
+    println!("relay connected ✓");
 
     let tunnel_port = TunnelPort {
         port_number: port,
@@ -153,22 +153,22 @@ async fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     host.add_port(&tunnel_port).await?;
-    println!("porta {port} encaminhada ✓");
+    println!("port {port} forwarded ✓");
 
     if let Some(uri) = fetch_port_uri(&full_id, port) {
         println!("\nPublic URL: {uri}");
-        println!("Valide com:  curl -s {uri}");
-        println!("Esperado:    DEVTUNNEL_SPIKE_OK\n");
+        println!("Validate:    curl -s {uri}");
+        println!("Expected:    DEVTUNNEL_SPIKE_OK\n");
     }
 
-    println!("hospedando por 120s (Ctrl-C para sair antes)…");
+    println!("hosting for 120s (Ctrl-C to exit early)…");
 
     tokio::select! {
         r = handle => {
-            println!("túnel desconectou: {r:?}");
+            println!("tunnel disconnected: {r:?}");
         }
         _ = tokio::time::sleep(Duration::from_secs(120)) => {
-            println!("tempo do spike encerrado.");
+            println!("spike time elapsed.");
         }
     }
 

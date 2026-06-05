@@ -1,68 +1,68 @@
-# Spike #2 — Hospedagem nativa via SDK `tunnels` (HITL)
+# Spike #2 — Native hosting via `tunnels` SDK (HITL)
 
-Valida a aposta do [ADR-0001](../adr/0001-split-cli-management-sdk-hosting-rust.md):
-o SDK Rust `tunnels` (feature `connections`) consegue hospedar um túnel **em
-processo**, autorizado por um host token emitido via `devtunnel token`.
+Validates the bet from [ADR-0001](../adr/0001-split-cli-management-sdk-hosting-rust.md):
+the Rust `tunnels` SDK (feature `connections`) can host a tunnel **in-process**,
+authorized by a host token minted via `devtunnel token`.
 
-## API confirmada (lendo o source do SDK)
+## Confirmed API (from SDK source)
 
-- `new_tunnel_management("ua").into()` → `TunnelManagementClient` (auth `Anonymous` default).
-- `TunnelLocator::ID { cluster, id }` — o id do CLI `nome.cluster` separa no último `.`.
+- `new_tunnel_management("ua").into()` → `TunnelManagementClient` (default auth: `Anonymous`).
+- `TunnelLocator::ID { cluster, id }` — the CLI `name.cluster` id splits at the last `.`.
 - `RelayTunnelHost::new(locator, mgmt)` → `connect(host_token)` → `RelayHandle`
-  (Future; completa ao desconectar) → `add_port(&TunnelPort)`.
-- `add_port` chama `create_tunnel_port` com auth anônima mas **trata 409 (já existe)
-  como OK** → não precisa de token de management se a porta já foi criada via CLI.
-- Host token: `devtunnel token <id> --scopes host -j` → campo `token`.
+  (Future; completes on disconnect) → `add_port(&TunnelPort)`.
+- `add_port` calls `create_tunnel_port` with anonymous auth but **treats 409 (already exists)
+  as OK** → no management token needed if the port was already created via CLI.
+- Host token: `devtunnel token <id> --scopes host -j` → `token` field.
 
-## Achados de risco
+## Risk findings
 
-### 1. Toolchain de build pesado no Windows (vendored OpenSSL)
-O SDK fixa `russh`/`russh-keys` com feature **openssl**. Para não depender de
-OpenSSL do sistema, usamos `vendored-openssl`, que compila OpenSSL do zero e exige:
-- **NASM** (instalado via `winget install NASM.NASM`) — senão falha o assembly.
-- **Strawberry Perl** (instalado via `winget`) — o perl do msys2 não tem
-  `Locale::Maketext::Simple`, quebrando o `./Configure` do OpenSSL.
-- Toolchain **MSVC** (já presente).
+### 1. Heavy build toolchain on Windows (vendored OpenSSL)
+The SDK pins `russh`/`russh-keys` with the **openssl** feature. To avoid depending on
+a system OpenSSL, we use `vendored-openssl`, which compiles OpenSSL from source and requires:
+- **NASM** (install via `winget install NASM.NASM`) — assembly fails without it.
+- **Strawberry Perl** (install via `winget`) — the msys2 perl lacks
+  `Locale::Maketext::Simple`, breaking OpenSSL's `./Configure`.
+- **MSVC toolchain** (already present).
 
-Implicação: build a partir do fonte no Windows é não-trivial. Para *distribuição*
-é um custo único de dev (gera binário pronto), mas é um ponto contra a leveza.
+Implication: building from source on Windows is non-trivial. For *distribution* this
+is a one-time dev cost (produces a ready binary), but it is a point against lightness.
 
-### 2. Host token expira em ~24h
-`devtunnel token --scopes host` retorna `lifeTime: 1.00:00:01`. Keep-alive de longa
-duração precisa **re-emitir o token e reconectar** periodicamente (≤ 24h).
+### 2. Host token expires in ~24h
+`devtunnel token --scopes host` returns `lifeTime: 1.00:00:01`. Long-running keep-alive
+must **re-mint the token and reconnect** periodically (≤ 24h).
 
-### 3. Hospedar precisa de DOIS tokens, não um
-Um host token sozinho **não basta**: `connect()` autoriza o endpoint de relay com o
-host token (ok), mas `add_port()` chama `create_tunnel_port` no mgmt client, que com
-auth anônima retorna **401** (mesmo a porta já existindo — o 401 vem antes do 409).
-Solução: dois tunnel tokens:
-- `host` → passado em `host.connect(host_token)`.
-- `manage:ports` → default auth do `TunnelManagementClient` (`add_port`).
+### 3. Hosting requires TWO tokens, not one
+A single host token is **not enough**: `connect()` authorizes the relay endpoint with
+the host token (ok), but `add_port()` calls `create_tunnel_port` on the mgmt client,
+which with anonymous auth returns **401** (even if the port already exists — the 401
+comes before the 409). Solution: two tunnel tokens:
+- `host` → passed to `host.connect(host_token)`.
+- `manage:ports` → default auth of the `TunnelManagementClient` (`add_port`).
 
-### 4. Bug do CLI ao repetir `--scopes`
-`devtunnel token ... --scopes host --scopes manage:ports` corrompe o 1º escopo para
-`shost` (inválido). **Mintar um escopo por token** (chamadas separadas).
+### 4. CLI bug when repeating `--scopes`
+`devtunnel token ... --scopes host --scopes manage:ports` corrupts the first scope to
+`shost` (invalid). **Mint one scope per token** (separate calls).
 
-## Resultado em runtime — ✅ SUCESSO
+## Runtime result — ✅ SUCCESS
 
 ```
-relay conectado ✓
-porta 3000 encaminhada ✓
+relay connected ✓
+port 3000 forwarded ✓
 Public URL: https://9nfm43tl-3000.brs.devtunnels.ms/
 curl → DEVTUNNEL_SPIKE_OK  (HTTP 200)
 ```
 
-Tráfego público chegou ao servidor local **sem processo `devtunnel host` externo**.
-O SDK hospeda em processo. **ADR-0001 confirmado.**
+Public traffic reached the local server **without an external `devtunnel host` process**.
+The SDK hosts in-process. **ADR-0001 confirmed.**
 
-## Recomendação
+## Recommendation
 
-Seguir com hospedagem via SDK (ADR-0001). Encapsular atrás de um trait `TunnelHost`
-(implementação SDK), mantendo a porta de fuga para fallback `devtunnel host` apenas se
-a manutenção (token refresh / reconexão / build OpenSSL) se provar custosa demais.
+Proceed with SDK hosting (ADR-0001). Encapsulate behind a `TunnelHost` trait
+(SDK implementation), keeping the escape hatch for `devtunnel host` fallback only if
+maintenance (token refresh / reconnect / OpenSSL build) proves too costly.
 
-### Implicações para as próximas fatias
-- **#4 (hospedar):** mintar 2 tokens por grupo (`host` + `manage:ports`); reconectar
-  e re-mintar antes de ~24h; "parar" = dropar o `RelayHandle`.
-- **Build/CI:** documentar/automatizar NASM + Strawberry Perl + `vendored-openssl`
-  (ou produzir binário pré-compilado para o usuário final).
+### Implications for upcoming slices
+- **#4 (hosting):** mint 2 tokens per group (`host` + `manage:ports`); reconnect and
+  re-mint before ~24h; "stop" = drop the `RelayHandle`.
+- **Build/CI:** document/automate NASM + Strawberry Perl + `vendored-openssl`
+  (or produce a pre-compiled binary for the end user).

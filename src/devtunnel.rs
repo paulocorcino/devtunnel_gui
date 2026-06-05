@@ -1,17 +1,19 @@
-//! Camada de subprocesso do CLI `devtunnel` (sem PowerShell).
-//! Invoca o binário direto via `std::process::Command` e desserializa a saída `-j`.
-//! Roda sempre fora da thread de UI.
+//! Subprocess layer for the `devtunnel` CLI (no PowerShell).
+//! Invokes the binary directly via `std::process::Command` and deserializes the `-j` output.
+//! Always runs off the UI thread.
 
+use crate::locale::Locale;
 use crate::model::{ShowResult, TunnelList};
 use anyhow::{anyhow, Context, Result};
+use fluent_bundle::FluentArgs;
 use serde::de::DeserializeOwned;
 use std::process::Command;
 
-/// Uma porta achatada com sua URL, pronta para a UI.
+/// A flattened port with its URL, ready for the UI.
 pub struct Row {
-    /// Nome amigável do grupo (cai para o tunnel_id quando o túnel não tem nome).
+    /// Friendly group name (falls back to tunnel_id when the tunnel has no name).
     pub group: String,
-    /// O Real Tunnel ID — a chave estável usada pelo serviço.
+    /// The Real Tunnel ID — the stable key used by the service.
     pub tunnel_id: String,
     pub port: i32,
     pub protocol: String,
@@ -19,50 +21,51 @@ pub struct Row {
     pub expiration: String,
 }
 
-/// Resolve o binário. Permite override por `DEVTUNNEL_BIN`; senão confia no PATH.
+/// Resolves the binary. Allows override via `DEVTUNNEL_BIN`; otherwise trusts PATH.
 fn bin() -> String {
     std::env::var("DEVTUNNEL_BIN").unwrap_or_else(|_| "devtunnel".to_string())
 }
 
-fn run_json<T: DeserializeOwned>(args: &[&str]) -> Result<T> {
+fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
+    let joined = args.join(" ");
     let output = Command::new(bin())
         .args(args)
         .output()
         .with_context(|| {
-            format!(
-                "falha ao executar `devtunnel {}` — o CLI está no PATH? \
-                 (defina DEVTUNNEL_BIN se necessário)",
-                args.join(" ")
-            )
+            let mut a = FluentArgs::new();
+            a.set("args", joined.clone());
+            loc.t_args("err-cli-not-found", &a)
         })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!(
-            "`devtunnel {}` retornou erro: {}",
-            args.join(" "),
-            stderr.trim()
-        ));
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        a.set("stderr", stderr.trim().to_string());
+        return Err(anyhow!("{}", loc.t_args("err-cli-failed", &a)));
     }
 
-    // O CLI às vezes imprime linhas em branco antes do JSON; serde ignora whitespace.
-    serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("JSON inválido de `devtunnel {}`", args.join(" ")))
+    // The CLI sometimes prints blank lines before the JSON; serde ignores leading whitespace.
+    serde_json::from_slice(&output.stdout).with_context(|| {
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        loc.t_args("err-cli-invalid-json", &a)
+    })
 }
 
-/// Enumera túneis (`list -j`) e, para cada um, busca portas + URLs (`show -j`).
-pub fn fetch_rows() -> Result<Vec<Row>> {
-    let list: TunnelList = run_json(&["list", "-j"])?;
+/// Enumerates tunnels (`list -j`) and, for each one, fetches ports + URLs (`show -j`).
+pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
+    let list: TunnelList = run_json(&["list", "-j"], loc)?;
 
     let mut rows = Vec::new();
     for t in list.tunnels {
-        // Nome amigável quando existe; o Real Tunnel ID é sempre a chave estável.
+        // Use friendly name when available; Real Tunnel ID is always the stable key.
         let group = if t.name.is_empty() {
             t.tunnel_id.clone()
         } else {
             t.name.clone()
         };
-        match run_json::<ShowResult>(&["show", &t.tunnel_id, "-j"]) {
+        match run_json::<ShowResult>(&["show", &t.tunnel_id, "-j"], loc) {
             Ok(show) => {
                 let exp = show.tunnel.tunnel_expiration;
                 if show.tunnel.ports.is_empty() {
@@ -87,7 +90,7 @@ pub fn fetch_rows() -> Result<Vec<Row>> {
                     }
                 }
             }
-            // Se o `show` falhar para um túnel, ainda mostramos o grupo com o que temos.
+            // If `show` fails for a tunnel, still show the group with what we have.
             Err(_) => rows.push(Row {
                 group: group.clone(),
                 tunnel_id: t.tunnel_id.clone(),

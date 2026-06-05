@@ -1,12 +1,12 @@
-//! Tipos que mapeiam a saída JSON (`-j`) do CLI `devtunnel`.
-//! O serviço é a fonte da verdade; estes structs só desserializam o que ele retorna.
-//! Alguns campos ainda não são lidos pela UI, mas refletem o contrato do CLI e
-//! serão usados nas próximas fatias (badges, contagem de portas, etc.).
+//! Types that map the JSON (`-j`) output of the `devtunnel` CLI.
+//! The service is the source of truth; these structs only deserialize what it returns.
+//! Some fields are not yet read by the UI but reflect the CLI contract and
+//! will be used in upcoming slices (badges, port counts, etc.).
 #![allow(dead_code)]
 
 use serde::Deserialize;
 
-/// Saída de `devtunnel list -j`.
+/// Output of `devtunnel list -j`.
 #[derive(Debug, Deserialize)]
 pub struct TunnelList {
     #[serde(default)]
@@ -29,7 +29,7 @@ pub struct TunnelSummary {
     pub description: String,
 }
 
-/// Saída de `devtunnel show <id> -j` (mais rica: traz portUri e accessControl).
+/// Output of `devtunnel show <id> -j` (richer: includes portUri and accessControl).
 #[derive(Debug, Deserialize)]
 pub struct ShowResult {
     pub tunnel: TunnelDetail,
@@ -51,7 +51,7 @@ pub struct PortDetail {
     pub port_number: i32,
     #[serde(default)]
     pub protocol: String,
-    /// A Public URL real. Vem do `show`, não dá para construir manualmente.
+    /// The real Public URL. Comes from `show`; cannot be constructed manually.
     #[serde(default)]
     pub port_uri: Option<String>,
 }

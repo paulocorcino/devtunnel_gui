@@ -1,102 +1,103 @@
-# Design da UI — DevTunnel GUI
+# UI Design — DevTunnel GUI
 
-Direção visual: **ferramenta de dev SaaS, calma e status-forward** (vibe ngrok /
-Tailscale / Linear). Compacta, neutra, com um único acento e cores de status fortes.
-Pragmática: sem ilustrações, sem animações pesadas. O `Theme` global
-([ui/theme.slint](../../ui/theme.slint)) é a fonte única de cores/espaçamento.
+Visual direction: **calm, status-forward SaaS dev tool** (ngrok / Tailscale / Linear
+vibe). Compact, neutral, single accent, strong status colors. Pragmatic: no
+illustrations, no heavy animations. The global `Theme`
+([ui/theme.slint](../../ui/theme.slint)) is the single source of truth for
+colors/spacing.
 
-## Princípios
+## Principles
 
-1. **Status em primeiro lugar.** O usuário abre o app para saber "minhas URLs estão no ar?". Cada porta tem um ponto de status sempre visível.
-2. **URL é o produto.** A Public URL é destaque (fonte mono), copiável em 1 clique.
-3. **Grupo organiza, porta é a unidade.** Lista agrupada por Grupo (=Tunnel); a linha acionável é a porta.
-4. **Cru = bug.** Nada de widget default sem tema. Tudo passa pelo `Theme`.
-5. **Dark mode de primeira classe** (dev usa à noite). Alterna via `Theme.dark`.
+1. **Status first.** The user opens the app to check "are my URLs up?". Each port has an always-visible status dot.
+2. **URL is the product.** The Public URL is prominent (monospace font), copyable in 1 click.
+3. **Group organizes, port is the unit.** List grouped by Group (=Tunnel); the actionable row is the port.
+4. **Raw = bug.** No un-themed default widget. Everything goes through `Theme`.
+5. **Dark mode is first-class** (devs work at night). Toggle via `Theme.dark`.
 
-## Paleta (`Theme`)
+## Palette (`Theme`)
 
-| Token | Light | Dark | Uso |
+| Token | Light | Dark | Use |
 |---|---|---|---|
-| `bg` | `#ffffff` | `#0f1117` | fundo da janela |
-| `surface` | `#f7f8fa` | `#171a21` | cartões de grupo, barras |
-| `surface-2` | `#ffffff` | `#1e222b` | linha em hover / inputs |
-| `border` | `#e5e7eb` | `#262b36` | divisores, contornos |
-| `text` | `#1f2330` | `#e6e8ee` | texto principal |
-| `muted` | `#6b7280` | `#9aa3b2` | legendas, metadados |
-| `accent` | `#4f46e5` | `#6366f1` | ação primária, foco |
-| `ok` | `#16a34a` | `#22c55e` | Operacional |
-| `warn` | `#d97706` | `#f59e0b` | Túnel ok, serviço caído |
-| `down` | `#dc2626` | `#ef4444` | Fora |
-| `idle` | `#9ca3af` | `#9ca3af` | não hospedado / parado |
+| `bg` | `#ffffff` | `#0f1117` | window background |
+| `surface` | `#f7f8fa` | `#171a21` | group cards, bars |
+| `surface-2` | `#ffffff` | `#1e222b` | hovered row / inputs |
+| `border` | `#e5e7eb` | `#262b36` | dividers, outlines |
+| `text` | `#1f2330` | `#e6e8ee` | primary text |
+| `muted` | `#6b7280` | `#9aa3b2` | captions, metadata |
+| `accent` | `#4f46e5` | `#6366f1` | primary action, focus |
+| `ok` | `#16a34a` | `#22c55e` | Operational |
+| `warn` | `#d97706` | `#f59e0b` | Tunnel ok, service down |
+| `down` | `#dc2626` | `#ef4444` | Down |
+| `idle` | `#9ca3af` | `#9ca3af` | not hosted / stopped |
 
-Métricas: `radius 8px` · `gap 8px` · `pad 12px` · fonte mono `Consolas` (URLs).
-Tipografia: system UI (Segoe UI). Título 16–18 · seção 13 semibold · corpo 12–13 ·
-legenda 11 muted.
+Metrics: `radius 8px` · `gap 8px` · `pad 12px` · mono font `Consolas` (URLs).
+Typography: system UI (Segoe UI). Title 16–18 · section 13 semibold · body 12–13 ·
+caption 11 muted.
 
-## Estados de status (ponto + rótulo)
+## Status states (dot + label)
 
-| Estado | Cor | Quando | Origem |
+| State | Color | When | Source |
 |---|---|---|---|
-| Operacional | `ok` | relay roteia + serviço local responde | sonda (#4/#5) |
-| Serviço caído | `warn` | relay responde, upstream morto (502/503) | sonda |
-| Fora | `down` | URL inalcançável | sonda |
-| Parado | `idle` | grupo não hospedado | estado local |
-| Hospedando… | `accent` (pulsante leve) | conectando ao relay | transição |
+| Operational | `ok` | relay routing + local service responds | probe (#4/#5) |
+| Service down | `warn` | relay responds, upstream dead (502/503) | probe |
+| Down | `down` | URL unreachable | probe |
+| Stopped | `idle` | group not hosted | local state |
+| Hosting… | `accent` (light pulse) | connecting to relay | transition |
 
 ## Layout (mockup)
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
-│ Dev Tunnels            ● Conectado: paulo@…      [ Atualizar ] [ ⚙ ] │  ← top bar (surface)
+│ Dev Tunnels            ● Connected: paulo@…      [ Refresh ] [ ⚙ ] │  ← top bar (surface)
 ├────────────────────────────────────────────────────────────────────┤
 │  ┌──────────────────────────────────────────────────────────────┐  │
-│  │ frontend                       expira em 29d        [ ●○ Host ]│  │  ← group card header
+│  │ frontend                       expires in 29d      [ ●○ Host ]│  │  ← group card header
 │  │ ───────────────────────────────────────────────────────────── │  │
-│  │  ● 3000  http   https://9nfm43tl-3000.brs.devtunnels.ms  ⧉  ↗ │  │  ← port row (status·porta·proto·url·copiar·abrir)
+│  │  ● 3000  http   https://9nfm43tl-3000.brs.devtunnels.ms  ⧉  ↗ │  │  ← port row (status·port·proto·url·copy·open)
 │  │  ● 5173  auto   https://9nfm43tl-5173.brs.devtunnels.ms  ⧉  ↗ │  │
 │  └──────────────────────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────────────────────┐  │
-│  │ apis                           expira em 12d        [ ○● Host ]│  │
+│  │ apis                           expires in 12d      [ ○● Host ]│  │
 │  │  ● 8049  http   https://…-8049.brs.devtunnels.ms         ⧉  ↗ │  │
 │  └──────────────────────────────────────────────────────────────┘  │
-│                                                       [ + Novo grupo ]│
+│                                                       [ + New group ]│
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-Estado vazio: cartão central "Nenhum grupo ainda" + botão `+ Criar grupo`.
+Empty state: centered card "No groups yet" + `+ Create group` button.
 
-## Inventário de componentes (Slint)
+## Component inventory (Slint)
 
-Arquivos sob `ui/`, consumidos por `app-window.slint`:
+Files under `ui/`, consumed by `app-window.slint`:
 
-- `theme.slint` — global `Theme` (✅ criado).
-- `StatusDot` — círculo colorido por estado (+ tooltip com o rótulo).
-- `Pill` — chip pequeno (expiração, protocolo, status do login).
-- `IconButton` — botão fantasma para ações de linha (copiar ⧉, abrir ↗).
-- `PrimaryButton` / `GhostButton` — ações filled / outline.
-- `Toggle` — switch Host/Parar do cabeçalho do grupo.
-- `GroupCard` — cartão: header (nome, expiração, toggle) + lista de `PortRow`.
-- `PortRow` — status · porta · protocolo · URL mono · ações em hover.
-- `Field` / `Select` / `Collapsible` — para os diálogos (#3): porta, grupo, "Avançado".
-- `Toast` — confirmação efêmera ("URL copiada").
+- `theme.slint` — global `Theme` (✅ created).
+- `StatusDot` — dot colored by state (+ tooltip with label).
+- `Pill` — small chip (expiration, protocol, login status).
+- `IconButton` — ghost button for row actions (copy ⧉, open ↗).
+- `PrimaryButton` / `GhostButton` — filled / outline actions.
+- `Toggle` — Host/Stop switch in the group card header.
+- `GroupCard` — card: header (name, expiration, toggle) + `PortRow` list.
+- `PortRow` — status · port · protocol · mono URL · hover actions.
+- `Field` / `Select` / `Collapsible` — for dialogs (#3): port, group, "Advanced".
+- `Toast` — ephemeral confirmation ("URL copied").
 
-## Interações
+## Interactions
 
-- **Clique na URL** copia (toast "copiada"). Botões ⧉/↗ explícitos também.
-- **Ações da linha** aparecem em hover (em telas pequenas, sempre visíveis).
-- **Enter** confirma diálogos; **Esc** cancela.
-- **Tray**: clique abre/fecha; menu Abrir/Sair (estado re-login muda o ícone — #5).
-- Dark mode: seguir o tema do Windows quando viável; senão toggle no ⚙.
+- **Click on URL** copies (toast "copied"). Explicit ⧉/↗ buttons also work.
+- **Row actions** appear on hover (always visible on small screens).
+- **Enter** confirms dialogs; **Esc** cancels.
+- **Tray**: click opens/closes; Open/Quit menu (re-login state changes the icon — #5).
+- Dark mode: follow Windows theme when feasible; otherwise toggle in ⚙.
 
-## Mapeamento para as fatias
+## Slice mapping
 
-| Slice | Entrega de UI no estilo acima |
+| Slice | UI deliverable |
 |---|---|
-| #1 (feito) | top bar + lista; agora repintada com `Theme` (base do sistema) |
-| #3 | `GroupCard` real, diálogos com `Field/Select/Collapsible`, estado vazio, `+ Novo grupo` |
-| #4 | `Toggle` Host, `StatusDot` 3-estados, `Toast` |
-| #5 | estado/ícone de **re-login** no tray + pill de login na top bar |
-| #6 | tela de ⚙ Configurações (intervalo da sonda, auto-start, expiração padrão, dark mode) |
+| #1 (done) | top bar + list; repainted with `Theme` (base of the system) |
+| #3 | real `GroupCard`, dialogs with `Field/Select/Collapsible`, empty state, `+ New group` |
+| #4 | `Toggle` Host, 3-state `StatusDot`, `Toast` |
+| #5 | **re-login** state/icon in tray + login pill in top bar |
+| #6 | ⚙ Settings screen (probe interval, auto-start, default expiration, dark mode) |
 
-> Regra para as próximas fatias: **nenhuma cor/medida hard-coded** — sempre `Theme.*`.
-> Componentes novos viram arquivo em `ui/` e são reutilizados, não copiados.
+> Rule for upcoming slices: **no hard-coded colors or sizes** — always `Theme.*`.
+> New components go in separate `ui/` files and are reused, not copy-pasted.

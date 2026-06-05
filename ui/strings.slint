@@ -1,0 +1,19 @@
+// Translatable UI strings. All values are set from Rust at startup via
+// app.global::<Strings>().set_*(...). Default values are English fallbacks
+// so the UI renders correctly even before the locale is applied.
+export global Strings {
+    // Status bar
+    in property <string> status-loading:    "loading…";
+    in property <string> status-refreshing: "refreshing…";
+
+    // Top bar
+    in property <string> btn-refresh: "Refresh";
+
+    // Port list
+    in property <string> no-url:       "(no URL — port not configured)";
+    in property <string> expires-label: "expires";
+
+    // Port row actions
+    in property <string> btn-copy: "Copy";
+    in property <string> btn-open: "Open";
+}

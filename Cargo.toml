@@ -11,10 +11,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 arboard = "3"
+fluent-bundle = "0.15"
 open = "5"
+sys-locale = "0.3"
+unic-langid = "0.9"
 
-# Spike #2 (HITL): hospedagem nativa via SDK. Isolada atrás da feature `spike`
-# para não pesar no build da GUI até a decisão SDK-vs-fallback estar tomada.
+# Spike #2 (HITL): native hosting via SDK. Isolated behind the `spike` feature
+# to avoid adding build weight to the GUI until the SDK-vs-fallback decision is settled.
 tunnels = { git = "https://github.com/microsoft/dev-tunnels", features = ["connections", "vendored-openssl"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 env_logger = { version = "0.11", optional = true }
