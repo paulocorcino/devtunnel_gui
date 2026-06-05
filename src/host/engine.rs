@@ -182,12 +182,15 @@ async fn connect_once(
 ) -> anyhow::Result<tunnels::connections::RelayHandle> {
     let loc = Locale::load(&system_locale());
 
+    log::debug!("connect_once[{tunnel_id}]: minting host token");
     let host_token = devtunnel::mint_token(tunnel_id, "host", &loc)?;
+    log::debug!("connect_once[{tunnel_id}]: minting manage:ports token");
     let manage_token = devtunnel::mint_token(tunnel_id, "manage:ports", &loc)?;
 
     let (cluster, id) = devtunnel::split_locator(tunnel_id).ok_or_else(|| {
         anyhow::anyhow!("tunnel id has no cluster suffix (expected 'id.cluster'): {tunnel_id}")
     })?;
+    log::debug!("connect_once[{tunnel_id}]: locator cluster={cluster} id={id} ports={ports:?}");
 
     let mut builder = new_tunnel_management(USER_AGENT);
     builder.authorization(Authorization::Tunnel(manage_token));
@@ -195,7 +198,9 @@ async fn connect_once(
     let locator = TunnelLocator::ID { cluster, id };
 
     let mut host = RelayTunnelHost::new(locator, mgmt);
+    log::debug!("connect_once[{tunnel_id}]: connecting to relay");
     let handle = host.connect(&host_token).await?;
+    log::info!("connect_once[{tunnel_id}]: relay connected");
 
     for &port in ports {
         let tunnel_port = TunnelPort {
@@ -204,7 +209,9 @@ async fn connect_once(
             ..Default::default()
         };
         // `add_port` treats an already-existing port (409) as success.
+        log::debug!("connect_once[{tunnel_id}]: add_port {port}");
         host.add_port(&tunnel_port).await?;
+        log::info!("connect_once[{tunnel_id}]: port {port} forwarded");
     }
 
     Ok(handle)
