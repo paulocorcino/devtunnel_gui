@@ -4,6 +4,7 @@
 mod devtunnel;
 mod host;
 mod locale;
+mod logbuf;
 mod model;
 #[cfg(feature = "hosting")]
 mod probe;
