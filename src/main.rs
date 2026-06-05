@@ -114,6 +114,14 @@ fn derive_host_state(state: &LiveState, tunnel_id: &str) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
+    // In the hosting build, surface the host-engine / SDK logs. Default to info for
+    // our crate + the tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=debug`).
+    #[cfg(feature = "hosting")]
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("devtunnel_gui=debug,tunnels=info"),
+    )
+    .init();
+
     let app = AppWindow::new()?;
 
     let loc = Rc::new(Locale::load(&locale::system_locale()));
@@ -399,6 +407,16 @@ fn main() -> anyhow::Result<()> {
                     state: hs,
                 }) = host_evt_rx.try_recv()
                 {
+                    log::debug!("host event: {tunnel_id} -> {hs:?}");
+                    // Surface connection failures in the status bar (otherwise a failed
+                    // Host is silent and looks like "nothing happened").
+                    if let host::HostState::Error(msg) = &hs {
+                        if let Some(a) = weak.upgrade() {
+                            let mut args = FluentArgs::new();
+                            args.set("message", msg.clone());
+                            a.set_status(loc.t_args("status-error", &args).into());
+                        }
+                    }
                     let id = map_host_state(&hs);
                     let mut st = state.borrow_mut();
                     match id {

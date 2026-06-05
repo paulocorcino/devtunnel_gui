@@ -30,7 +30,7 @@ ureq = { version = "2", default-features = false, features = ["tls"], optional =
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger", "dep:log"]
 # Integrated SDK hosting + health probe (issue #4). Kept gated so the default
 # `cargo build` stays light (no vendored OpenSSL / heavy toolchain).
-hosting = ["dep:tunnels", "dep:tokio", "dep:ureq", "dep:log"]
+hosting = ["dep:tunnels", "dep:tokio", "dep:ureq", "dep:log", "dep:env_logger"]
 
 [[bin]]
 name = "devtunnel_gui"
