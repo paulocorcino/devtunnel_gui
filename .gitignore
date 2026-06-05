@@ -27,6 +27,12 @@ Desktop.ini
 .scratch/
 .claude/
 
+# Ralph autonomous loop: per-worktree state and run logs (local evidence)
+.ralph/
+scripts/ralph/runs/
+scripts/ralph/worktrees/
+scripts/ralph/state/
+
 # Staged-plan gate logs (local evidence, not versioned)
 docs/plans/logs/
 __pycache__/
