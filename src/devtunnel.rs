@@ -219,6 +219,28 @@ pub fn mint_token(full_id: &str, scope: &str, loc: &Locale) -> Result<String> {
         })
 }
 
+/// Classifies a CLI failure message as "the sign-in is expired or absent".
+/// Pure heuristic over the stderr/error text the CLI emits when its cached
+/// credentials are gone or stale (e.g. after token expiry): the messages all
+/// either say so explicitly or tell the user to run `devtunnel user login`.
+/// Only the hosting engine calls it outside of tests.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn is_login_expired(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("not logged in")
+        || s.contains("login required")
+        || s.contains("devtunnel user login")
+        || s.contains("unauthorized")
+        || s.contains("(401)")
+        || (s.contains("token") && (s.contains("expired") || s.contains("invalid")))
+}
+
+/// Runs `devtunnel user login` — opens the browser for interactive auth and
+/// blocks until the CLI reports the result. Always call off the UI thread.
+pub fn user_login(loc: &Locale) -> Result<()> {
+    run_ok(&["user", "login"], loc)
+}
+
 /// Splits a full Tunnel ID of the form `id.cluster` (e.g. `frontend-3000.brs`)
 /// into `(cluster, id)`, the shape the SDK `TunnelLocator::ID` expects. Splits at
 /// the last `.`. Returns `None` when no cluster suffix is present.
@@ -319,6 +341,7 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
 
 #[cfg(test)]
 mod tests {
+    use super::is_login_expired;
     use super::sanitize_tunnel_id;
 
     #[test]
@@ -345,5 +368,55 @@ mod tests {
     fn empty_when_no_valid_chars() {
         assert_eq!(sanitize_tunnel_id("@@@"), "");
         assert_eq!(sanitize_tunnel_id("   "), "");
+    }
+
+    // ---- is_login_expired: representative CLI auth-failure messages ----
+
+    #[test]
+    fn login_expired_on_not_logged_in() {
+        assert!(is_login_expired(
+            "Not logged in. Run 'devtunnel user login' to log in."
+        ));
+    }
+
+    #[test]
+    fn login_expired_on_login_required_hint() {
+        assert!(is_login_expired(
+            "error: Login required. Please run `devtunnel user login`."
+        ));
+    }
+
+    #[test]
+    fn login_expired_on_unauthorized() {
+        assert!(is_login_expired(
+            "The request was rejected: 401 Unauthorized."
+        ));
+    }
+
+    #[test]
+    fn login_expired_on_expired_token() {
+        assert!(is_login_expired(
+            "Authentication failed: the access token has expired."
+        ));
+        assert!(is_login_expired("error: token is invalid or revoked"));
+    }
+
+    #[test]
+    fn login_expired_matches_wrapped_localized_error() {
+        // The engine sees the localized wrapper (err-cli-failed) around the raw
+        // stderr; the classifier must still hit on the embedded CLI text.
+        assert!(is_login_expired(
+            "`devtunnel token x --scopes host -j` returned error: Not logged in. Run 'devtunnel user login'."
+        ));
+    }
+
+    #[test]
+    fn not_login_expired_on_other_errors() {
+        assert!(!is_login_expired("connection timed out"));
+        assert!(!is_login_expired(
+            "tunnel id has no cluster suffix (expected 'id.cluster'): foo"
+        ));
+        assert!(!is_login_expired("port number must be between 1 and 65535"));
+        assert!(!is_login_expired("503 Service Unavailable"));
     }
 }
