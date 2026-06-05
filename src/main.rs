@@ -146,13 +146,11 @@ fn derive_host_state(state: &LiveState, tunnel_id: &str) -> String {
 }
 
 fn main() -> anyhow::Result<()> {
-    // In the hosting build, surface the host-engine / SDK logs. Default to info for
-    // our crate + the tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=debug`).
-    #[cfg(feature = "hosting")]
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("devtunnel_gui=debug,tunnels=info"),
-    )
-    .init();
+    // Install the capturing logger in every build: it tees records to stderr
+    // (what env_logger used to print in the hosting build) and into the ring
+    // buffer behind the Logs tab. Default to debug for our crate + info for the
+    // tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=trace`).
+    let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=debug,tunnels=info").install();
 
     let app = AppWindow::new()?;
 
