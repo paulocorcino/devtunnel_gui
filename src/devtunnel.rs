@@ -26,6 +26,73 @@ fn bin() -> String {
     std::env::var("DEVTUNNEL_BIN").unwrap_or_else(|_| "devtunnel".to_string())
 }
 
+/// Result of the startup preflight: is the CLI present and logged in?
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preflight {
+    /// CLI found and a user is logged in.
+    Ok,
+    /// The `devtunnel` binary could not be executed (not on PATH).
+    CliMissing,
+    /// CLI present but no valid login (never logged in or token expired).
+    LoggedOut,
+}
+
+/// Probes the environment: `devtunnel --version` for CLI presence, then
+/// `devtunnel user show -j` for login state. Never errors — the outcome is the
+/// enum, which the UI maps to a banner state.
+pub fn preflight() -> Preflight {
+    if Command::new(bin()).arg("--version").output().is_err() {
+        return Preflight::CliMissing;
+    }
+    match Command::new(bin()).args(["user", "show", "-j"]).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if classify_user_show(out.status.success(), &stdout) {
+                Preflight::Ok
+            } else {
+                Preflight::LoggedOut
+            }
+        }
+        Err(_) => Preflight::CliMissing,
+    }
+}
+
+/// Pure decision logic for [`preflight`]'s login probe: classifies the result
+/// of `devtunnel user show -j` as logged-in (`true`) or logged-out (`false`).
+/// A failed command or an output reporting "not logged in" means logged out.
+pub fn classify_user_show(success: bool, stdout: &str) -> bool {
+    success && !stdout.to_ascii_lowercase().contains("not logged in")
+}
+
+/// Heuristically classifies a CLI/host error message as an authentication /
+/// login-expiry failure (as opposed to a generic CLI error). Drives the switch
+/// into the re-login state when hosting or management fails mid-session.
+pub fn is_auth_error(stderr: &str) -> bool {
+    const NEEDLES: &[&str] = &[
+        "unauthorized",
+        "not logged in",
+        "login expired",
+        "login has expired",
+        "authentication failed",
+        "authentication required",
+        "token is expired",
+        "token has expired",
+        "devtunnel user login",
+        "please log in",
+        "401",
+        "403",
+    ];
+    let lower = stderr.to_ascii_lowercase();
+    NEEDLES.iter().any(|n| lower.contains(n))
+}
+
+/// Runs `devtunnel user login` (interactive — opens the system browser) and
+/// waits for it to finish. The caller re-runs [`preflight`] afterwards to
+/// confirm the login took effect.
+pub fn user_login(loc: &Locale) -> Result<()> {
+    run_ok(&["user", "login"], loc)
+}
+
 /// Options for creating a group (tunnel). Mirrors the minimal + advanced fields
 /// of the "New group" dialog.
 pub struct CreateGroupOpts {
@@ -317,7 +384,44 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
 
 #[cfg(test)]
 mod tests {
-    use super::sanitize_tunnel_id;
+    use super::{classify_user_show, is_auth_error, sanitize_tunnel_id};
+
+    #[test]
+    fn auth_errors_are_classified_true() {
+        assert!(is_auth_error("error: unauthorized."));
+        assert!(is_auth_error(
+            "User is not logged in. Run `devtunnel user login`."
+        ));
+        assert!(is_auth_error("Login expired, please sign in again"));
+        assert!(is_auth_error("Authentication failed for the current user"));
+        assert!(is_auth_error("The access token is expired"));
+        assert!(is_auth_error("HTTP 401 Unauthorized"));
+        assert!(is_auth_error("Forbidden (403)"));
+    }
+
+    #[test]
+    fn generic_cli_errors_are_classified_false() {
+        assert!(!is_auth_error("tunnel 'frontend-3000' not found"));
+        assert!(!is_auth_error("port number must be between 1 and 65535"));
+        assert!(!is_auth_error("network error: connection timed out"));
+        assert!(!is_auth_error("invalid JSON from `devtunnel list -j`"));
+        assert!(!is_auth_error(""));
+    }
+
+    #[test]
+    fn user_show_logged_in_when_success_and_no_marker() {
+        assert!(classify_user_show(
+            true,
+            r#"{"status":"Logged in as user@example.com"}"#
+        ));
+    }
+
+    #[test]
+    fn user_show_logged_out_on_marker_or_failure() {
+        assert!(!classify_user_show(true, r#"{"status":"Not logged in"}"#));
+        assert!(!classify_user_show(true, "NOT LOGGED IN."));
+        assert!(!classify_user_show(false, r#"{"status":"Logged in"}"#));
+    }
 
     #[test]
     fn lowercases_and_keeps_alphanumerics() {
