@@ -21,10 +21,11 @@ export global Theme {
     out property <color> accent-text: #ffffff;
 
     // Status
-    out property <color> ok:   dark ? #22c55e : #16a34a;
-    out property <color> warn: dark ? #f59e0b : #d97706;
-    out property <color> down: dark ? #ef4444 : #dc2626;
-    out property <color> idle: #9ca3af;
+    out property <color> ok:           dark ? #22c55e : #16a34a;
+    out property <color> warn:         dark ? #f59e0b : #d97706;
+    out property <color> down:         dark ? #ef4444 : #dc2626;
+    out property <color> idle:         #9ca3af;
+    out property <color> provisioning: dark ? #a78bfa : #7c3aed;
 
     // Metrics
     out property <length> radius: 8px;
@@ -38,12 +39,13 @@ export global Theme {
     out property <length> fs-caption: 11px;
     out property <string> mono: "Consolas";
 
-    // Status color from an identifier ("ok"/"warn"/"down"/"idle"/"host").
+    // Status color from an identifier ("ok"/"warn"/"down"/"idle"/"host"/"provisioning").
     pure public function status-color(s: string) -> color {
-        s == "ok"   ? ok :
-        s == "warn" ? warn :
-        s == "down" ? down :
-        s == "host" ? accent :
+        s == "ok"           ? ok :
+        s == "warn"         ? warn :
+        s == "down"         ? down :
+        s == "host"         ? accent :
+        s == "provisioning" ? provisioning :
         idle
     }
 }

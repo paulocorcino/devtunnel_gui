@@ -13,7 +13,7 @@ export struct PortRow {
     protocol: string,
     url: string,
     expiration: string,
-    status: string, // "idle" | "ok" | "warn" | "down" | "host"  (see theme.slint)
+    status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"  (see theme.slint)
     host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
 }
 
@@ -148,14 +148,16 @@ export component AppWindow inherits Window {
                                 alignment: center;
                                 StatusDot { status: row.status; }
                             }
-                            // Localized badge label for the 3 health states; hidden when idle/host.
-                            if row.status == "ok" || row.status == "warn" || row.status == "down" :
+                            // Localized badge label for health states and provisioning; hidden when idle/host.
+                            if row.status == "ok" || row.status == "warn" || row.status == "down" || row.status == "provisioning" :
                             Pill {
                                 text: row.status == "ok"
                                     ? Strings.badge-operational
                                     : (row.status == "warn"
                                         ? Strings.badge-service-down
-                                        : Strings.badge-down);
+                                        : (row.status == "down"
+                                            ? Strings.badge-down
+                                            : Strings.badge-provisioning));
                             }
                         }
                     }
@@ -206,7 +208,8 @@ export component AppWindow inherits Window {
                                 // Hosting a group with no port forwards nothing, so only
                                 // enable Host when the group has a port (or to Stop an
                                 // already-hosting group). A port==0 row is a portless group.
-                                enabled: root.hosting-enabled && (row.port != 0 || row.host-state == "hosting");
+                                // Provisioning rows are inert.
+                                enabled: root.hosting-enabled && row.status != "provisioning" && (row.port != 0 || row.host-state == "hosting");
                                 clicked => {
                                     if (row.host-state == "hosting") {
                                         root.stop(row.tunnel-id);
@@ -232,8 +235,8 @@ export component AppWindow inherits Window {
                             TxtButton {
                                 text: Strings.btn-del-port;
                                 danger: true;
-                                // A port==0 row is a group with no ports yet.
-                                enabled: row.port != 0;
+                                // A port==0 row is a group with no ports yet; provisioning rows are inert.
+                                enabled: row.port != 0 && row.status != "provisioning";
                                 clicked => {
                                     root.request-delete-port(row.group, row.tunnel-id, row.port);
                                 }
@@ -241,6 +244,7 @@ export component AppWindow inherits Window {
                             TxtButton {
                                 text: Strings.btn-del-group;
                                 danger: true;
+                                enabled: row.status != "provisioning";
                                 clicked => {
                                     root.request-delete-group(row.group, row.tunnel-id);
                                 }

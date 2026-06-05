@@ -17,8 +17,7 @@ impl Locale {
     /// Unknown locales fall back to `en-US`.
     pub fn load(lang: &str) -> Self {
         let source = ftl_source(lang);
-        let res = FluentResource::try_new(source.to_string())
-            .expect("embedded FTL must be valid");
+        let res = FluentResource::try_new(source.to_string()).expect("embedded FTL must be valid");
         let langid: LanguageIdentifier = lang
             .parse()
             .unwrap_or_else(|_| "en-US".parse().expect("en-US is valid"));
@@ -57,7 +56,10 @@ impl Locale {
         };
         let mut errors = vec![];
         let result = self.bundle.format_pattern(pattern, args, &mut errors);
-        debug_assert!(errors.is_empty(), "i18n format errors for {key}: {errors:?}");
+        debug_assert!(
+            errors.is_empty(),
+            "i18n format errors for {key}: {errors:?}"
+        );
         result.to_string()
     }
 }

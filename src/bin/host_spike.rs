@@ -101,16 +101,15 @@ async fn main() -> anyhow::Result<()> {
     let full_id = args
         .next()
         .unwrap_or_else(|| "paulo-desktop-diad0dn-3000.brs".to_string());
-    let port: u16 = args
-        .next()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(3000);
+    let port: u16 = args.next().and_then(|s| s.parse().ok()).unwrap_or(3000);
 
     // Split id and cluster at the last dot (e.g. "...-3000.brs" → id, "brs").
     let (id, cluster) = full_id
         .rsplit_once('.')
         .map(|(i, c)| (i.to_string(), c.to_string()))
-        .ok_or_else(|| anyhow::anyhow!("tunnel id has no cluster (expected 'id.cluster'): {full_id}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("tunnel id has no cluster (expected 'id.cluster'): {full_id}")
+        })?;
 
     println!("== SDK hosting spike ==");
     println!("tunnel id : {id}");

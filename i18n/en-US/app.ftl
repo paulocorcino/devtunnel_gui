@@ -73,6 +73,7 @@ status-stopped = stopped
 badge-operational = Operational
 badge-service-down = Service down
 badge-down = Down
+badge-provisioning = Provisioning…
 
 ## Tray menu
 menu-open-window = Open window

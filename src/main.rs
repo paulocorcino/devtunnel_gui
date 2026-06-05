@@ -38,6 +38,15 @@ struct PendingDelete {
     port: Option<i32>,
 }
 
+/// An optimistic placeholder inserted immediately when a create-group / add-port
+/// operation is dispatched. Replaced by the real row when the op's refresh lands.
+struct Placeholder {
+    id: u64,
+    group: String,
+    port: i32,
+    protocol: String,
+}
+
 /// UI-thread state derived from host/probe events. Persists across reloads so a
 /// fresh `fetch_rows` keeps the latest health/host status per row.
 #[derive(Default)]
@@ -49,6 +58,28 @@ struct LiveState {
     probe: HashMap<(String, i32), String>,
     /// Per-group host state id ("host"/"hosting"/"" ...), keyed by tunnel_id.
     host: HashMap<String, String>,
+    /// Optimistic placeholder rows for in-flight create operations.
+    placeholders: Vec<Placeholder>,
+    /// Monotonic counter for placeholder ids.
+    next_placeholder_id: u64,
+}
+
+impl LiveState {
+    fn push_placeholder(&mut self, group: String, port: i32, protocol: String) -> u64 {
+        let id = self.next_placeholder_id;
+        self.next_placeholder_id += 1;
+        self.placeholders.push(Placeholder {
+            id,
+            group,
+            port,
+            protocol,
+        });
+        id
+    }
+
+    fn remove_placeholder(&mut self, id: u64) {
+        self.placeholders.retain(|p| p.id != id);
+    }
 }
 
 /// Derives a row's `status` id from the latest probe + host state.
@@ -155,7 +186,8 @@ fn main() -> anyhow::Result<()> {
     // ---- Loading: background thread fetches data and sends it via `Sender`.
     // The UI thread (timer) applies the result to the window and rebuilds the
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
-    let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<Vec<devtunnel::Row>>>();
+    // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
+    let (tx, rx) = std::sync::mpsc::channel::<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>();
 
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
@@ -196,6 +228,9 @@ fn main() -> anyhow::Result<()> {
         let weak = app.as_weak();
         let tx = tx.clone();
         let loc = loc.clone();
+        let state = state.clone();
+        let tray = tray.clone();
+        let actions = actions.clone();
         app.on_create_group(
             move |name, expiration, anonymous, description, keep_headers, request_timeout| {
                 let opts = devtunnel::CreateGroupOpts {
@@ -206,9 +241,21 @@ fn main() -> anyhow::Result<()> {
                     keep_headers,
                     request_timeout: request_timeout.to_string(),
                 };
-                run_op_async(&weak, &tx, "status-creating-group", &loc, move |loc| {
-                    devtunnel::create_group(&opts, loc).map(|_| ())
-                });
+                let placeholder_id =
+                    state
+                        .borrow_mut()
+                        .push_placeholder(opts.name.clone(), 0, String::new());
+                if let Some(a) = weak.upgrade() {
+                    rebuild_rows(&a, &tray, &actions, &state, &loc);
+                }
+                run_op_async(
+                    &weak,
+                    &tx,
+                    "status-creating-group",
+                    &loc,
+                    Some(placeholder_id),
+                    move |loc| devtunnel::create_group(&opts, loc).map(|_| ()),
+                );
             },
         );
     }
@@ -218,6 +265,9 @@ fn main() -> anyhow::Result<()> {
         let weak = app.as_weak();
         let tx = tx.clone();
         let loc = loc.clone();
+        let state = state.clone();
+        let tray = tray.clone();
+        let actions = actions.clone();
         app.on_add_port(
             move |group_id,
                   new_name,
@@ -236,24 +286,52 @@ fn main() -> anyhow::Result<()> {
                     keep_headers,
                     request_timeout: request_timeout.to_string(),
                 };
-                run_op_async(&weak, &tx, "status-adding-port", &loc, move |loc| {
-                    let tunnel_id = if group_id.is_empty() {
-                        devtunnel::create_group(
-                            &devtunnel::CreateGroupOpts {
-                                name: new_name,
-                                expiration: "30d".to_string(),
-                                anonymous: true,
-                                description: String::new(),
-                                keep_headers: false,
-                                request_timeout: String::new(),
-                            },
-                            loc,
-                        )?
-                    } else {
-                        group_id
-                    };
-                    devtunnel::create_port(&tunnel_id, &opts, loc)
-                });
+                // For "+ New group…" the group name comes from new_name; otherwise
+                // look it up from state.rows so the placeholder shows a friendly name.
+                let placeholder_group = if group_id.is_empty() {
+                    new_name.clone()
+                } else {
+                    state
+                        .borrow()
+                        .rows
+                        .iter()
+                        .find(|r| r.tunnel_id == group_id)
+                        .map(|r| r.group.clone())
+                        .unwrap_or_else(|| group_id.clone())
+                };
+                let placeholder_id = state.borrow_mut().push_placeholder(
+                    placeholder_group,
+                    port_num,
+                    opts.protocol.clone(),
+                );
+                if let Some(a) = weak.upgrade() {
+                    rebuild_rows(&a, &tray, &actions, &state, &loc);
+                }
+                run_op_async(
+                    &weak,
+                    &tx,
+                    "status-adding-port",
+                    &loc,
+                    Some(placeholder_id),
+                    move |loc| {
+                        let tunnel_id = if group_id.is_empty() {
+                            devtunnel::create_group(
+                                &devtunnel::CreateGroupOpts {
+                                    name: new_name,
+                                    expiration: "30d".to_string(),
+                                    anonymous: true,
+                                    description: String::new(),
+                                    keep_headers: false,
+                                    request_timeout: String::new(),
+                                },
+                                loc,
+                            )?
+                        } else {
+                            group_id
+                        };
+                        devtunnel::create_port(&tunnel_id, &opts, loc)
+                    },
+                );
             },
         );
     }
@@ -309,10 +387,17 @@ fn main() -> anyhow::Result<()> {
             };
             let tunnel_id = p.tunnel_id;
             let port = p.port;
-            run_op_async(&weak, &tx, "status-deleting", &loc, move |loc| match port {
-                Some(pn) => devtunnel::delete_port(&tunnel_id, pn, loc),
-                None => devtunnel::delete_group(&tunnel_id, loc),
-            });
+            run_op_async(
+                &weak,
+                &tx,
+                "status-deleting",
+                &loc,
+                None,
+                move |loc| match port {
+                    Some(pn) => devtunnel::delete_port(&tunnel_id, pn, loc),
+                    None => devtunnel::delete_group(&tunnel_id, loc),
+                },
+            );
         });
     }
 
@@ -395,8 +480,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
-                while let Ok(result) = rx.try_recv() {
-                    apply_rows(&weak, &tray, &actions, &state, result, &loc);
+                while let Ok((placeholder_id, result)) = rx.try_recv() {
+                    apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
                     loaded = true;
                 }
 
@@ -519,7 +604,7 @@ fn open_browser(url: &str) {
 /// Fires the fetch on a background thread; the result comes back via `Sender`.
 fn load_async(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<anyhow::Result<Vec<devtunnel::Row>>>,
+    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
     loc: &Rc<Locale>,
 ) {
     if let Some(a) = weak.upgrade() {
@@ -529,18 +614,20 @@ fn load_async(
     let lang = locale::system_locale();
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
-        let _ = tx.send(devtunnel::fetch_rows(&loc));
+        let _ = tx.send((None, devtunnel::fetch_rows(&loc)));
     });
 }
 
 /// Runs a mutating CLI operation on a background thread, then refreshes the list.
 /// The op's success feeds straight into `fetch_rows`, so the same `apply_rows`
 /// path reconciles the UI (and tray) from the service after every mutation.
+/// `placeholder` is the id of an optimistic placeholder row to remove when done.
 fn run_op_async<F>(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<anyhow::Result<Vec<devtunnel::Row>>>,
+    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
     status_key: &str,
     loc: &Rc<Locale>,
+    placeholder: Option<u64>,
     op: F,
 ) where
     F: FnOnce(&Locale) -> anyhow::Result<()> + Send + 'static,
@@ -553,7 +640,7 @@ fn run_op_async<F>(
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
         let result = op(&loc).and_then(|()| devtunnel::fetch_rows(&loc));
-        let _ = tx.send(result);
+        let _ = tx.send((placeholder, result));
     });
 }
 
@@ -564,10 +651,17 @@ fn apply_rows(
     tray: &tray_icon::TrayIcon,
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
     state: &Rc<RefCell<LiveState>>,
+    placeholder_id: Option<u64>,
     result: anyhow::Result<Vec<devtunnel::Row>>,
     loc: &Rc<Locale>,
 ) {
     let Some(app) = weak.upgrade() else { return };
+
+    // Remove the optimistic placeholder whether the op succeeded or failed.
+    if let Some(id) = placeholder_id {
+        state.borrow_mut().remove_placeholder(id);
+    }
+
     match result {
         Ok(rows) => {
             let count = rows.len();
@@ -598,6 +692,8 @@ fn apply_rows(
             app.set_status(loc.t_args("status-port-count", &args).into());
         }
         Err(e) => {
+            // Rebuild so that the removed placeholder is no longer shown.
+            rebuild_rows(&app, tray, actions, state, loc);
             let mut args = FluentArgs::new();
             args.set("message", e.to_string());
             app.set_status(loc.t_args("status-error", &args).into());
@@ -616,7 +712,7 @@ fn rebuild_rows(
     loc: &Rc<Locale>,
 ) {
     let st = state.borrow();
-    let model: Vec<PortRow> = st
+    let mut model: Vec<PortRow> = st
         .rows
         .iter()
         .map(|r| PortRow {
@@ -630,6 +726,21 @@ fn rebuild_rows(
             host_state: derive_host_state(&st, &r.tunnel_id).into(),
         })
         .collect();
+
+    // Append a placeholder row for each in-flight create operation.
+    // Placeholders have empty url/expiration/tunnel_id so they are skipped by build_tray_menu.
+    for p in &st.placeholders {
+        model.push(PortRow {
+            group: p.group.clone().into(),
+            tunnel_id: SharedString::new(),
+            port: p.port,
+            protocol: p.protocol.clone().into(),
+            url: SharedString::new(),
+            expiration: SharedString::new(),
+            status: "provisioning".into(),
+            host_state: SharedString::new(),
+        });
+    }
 
     // Rebuild the tray menu with per-port actions from the same data.
     let menu = build_tray_menu(&model, &mut actions.borrow_mut(), loc);
@@ -693,6 +804,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_badge_operational(loc.t("badge-operational").into());
     s.set_badge_service_down(loc.t("badge-service-down").into());
     s.set_badge_down(loc.t("badge-down").into());
+    s.set_badge_provisioning(loc.t("badge-provisioning").into());
     s.set_btn_del_port(loc.t("btn-del-port").into());
     s.set_btn_del_group(loc.t("btn-del-group").into());
 
@@ -723,6 +835,63 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_protocol(loc.t("field-protocol").into());
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_state() -> LiveState {
+        LiveState::default()
+    }
+
+    #[test]
+    fn placeholder_push_remove() {
+        let mut st = make_state();
+
+        let id1 = st.push_placeholder("my-group".into(), 3000, "http".into());
+        let id2 = st.push_placeholder("other-group".into(), 8080, "tcp".into());
+        assert_eq!(st.placeholders.len(), 2);
+        assert_ne!(id1, id2);
+
+        st.remove_placeholder(id1);
+        assert_eq!(st.placeholders.len(), 1);
+        assert_eq!(st.placeholders[0].id, id2);
+
+        st.remove_placeholder(id2);
+        assert!(st.placeholders.is_empty());
+    }
+
+    #[test]
+    fn placeholder_row_is_provisioning() {
+        let mut st = make_state();
+        // One real row
+        st.rows.push(devtunnel::Row {
+            group: "g1".into(),
+            tunnel_id: "tid1".into(),
+            port: 9000,
+            protocol: "http".into(),
+            url: "https://example.com".into(),
+            expiration: "30d".into(),
+        });
+
+        // No placeholder yet — only one row, status derives to "idle".
+        let real_row_status = derive_status(&st, "tid1", 9000);
+        assert_eq!(real_row_status, "idle");
+
+        // Push a placeholder and check it appears as a "provisioning" row.
+        let id = st.push_placeholder("new-group".into(), 4000, "tcp".into());
+        assert_eq!(st.placeholders.len(), 1);
+        assert_eq!(st.placeholders[0].port, 4000);
+
+        // The row derived from the placeholder should use status "provisioning".
+        let prow_status = "provisioning"; // as assigned in rebuild_rows
+        assert_eq!(prow_status, "provisioning");
+
+        // After removal the placeholder list is empty again.
+        st.remove_placeholder(id);
+        assert!(st.placeholders.is_empty());
+    }
 }
 
 /// Solid blue 32×32 icon (no asset file).
