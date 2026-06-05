@@ -84,13 +84,15 @@ impl LiveState {
 
 /// Derives a row's `status` id from the latest probe + host state.
 /// Probe result wins (it is the most specific); otherwise fall back to the
-/// group's host state ("host" = hosting but not yet probed) or "idle".
-fn derive_status(state: &LiveState, tunnel_id: &str, port: i32) -> String {
+/// group's host state ("host" = hosting but not yet probed), then to the
+/// service-reported `host_connections` count, then "idle".
+fn derive_status(state: &LiveState, tunnel_id: &str, port: i32, host_connections: i64) -> String {
     if let Some(s) = state.probe.get(&(tunnel_id.to_string(), port)) {
         return s.clone();
     }
     match state.host.get(tunnel_id).map(String::as_str) {
         Some("hosting") | Some("host") => "host".to_string(),
+        _ if host_connections > 0 => "host".to_string(),
         _ => "idle".to_string(),
     }
 }
@@ -136,10 +138,14 @@ fn hosting_targets(state: &LiveState) -> Vec<probe::ProbeTarget> {
         .collect()
 }
 
-/// The group toggle label state ("hosting" when the group is being hosted).
-fn derive_host_state(state: &LiveState, tunnel_id: &str) -> String {
+/// Derives the group toggle state:
+/// - `"hosting"` when this session is actively hosting the group,
+/// - `"external"` when the service reports active connections but this session is not hosting,
+/// - `""` otherwise.
+fn derive_host_state(state: &LiveState, tunnel_id: &str, host_connections: i64) -> String {
     match state.host.get(tunnel_id).map(String::as_str) {
         Some("hosting") | Some("host") => "hosting".to_string(),
+        _ if host_connections > 0 => "external".to_string(),
         _ => String::new(),
     }
 }
@@ -722,8 +728,8 @@ fn rebuild_rows(
             protocol: r.protocol.clone().into(),
             url: r.url.clone().into(),
             expiration: r.expiration.clone().into(),
-            status: derive_status(&st, &r.tunnel_id, r.port).into(),
-            host_state: derive_host_state(&st, &r.tunnel_id).into(),
+            status: derive_status(&st, &r.tunnel_id, r.port, r.host_connections).into(),
+            host_state: derive_host_state(&st, &r.tunnel_id, r.host_connections).into(),
         })
         .collect();
 
@@ -805,6 +811,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_badge_service_down(loc.t("badge-service-down").into());
     s.set_badge_down(loc.t("badge-down").into());
     s.set_badge_provisioning(loc.t("badge-provisioning").into());
+    s.set_badge_hosted_external(loc.t("badge-hosted-external").into());
     s.set_btn_del_port(loc.t("btn-del-port").into());
     s.set_btn_del_group(loc.t("btn-del-group").into());
 
@@ -873,10 +880,11 @@ mod tests {
             protocol: "http".into(),
             url: "https://example.com".into(),
             expiration: "30d".into(),
+            host_connections: 0,
         });
 
         // No placeholder yet — only one row, status derives to "idle".
-        let real_row_status = derive_status(&st, "tid1", 9000);
+        let real_row_status = derive_status(&st, "tid1", 9000, 0);
         assert_eq!(real_row_status, "idle");
 
         // Push a placeholder and check it appears as a "provisioning" row.
@@ -891,6 +899,54 @@ mod tests {
         // After removal the placeholder list is empty again.
         st.remove_placeholder(id);
         assert!(st.placeholders.is_empty());
+    }
+
+    #[test]
+    fn derive_host_state_session_hosting_wins_over_service_count() {
+        let mut st = make_state();
+        st.host.insert("t1".into(), "hosting".into());
+        // Even with host_connections > 0, this-session state returns "hosting".
+        assert_eq!(derive_host_state(&st, "t1", 3), "hosting");
+    }
+
+    #[test]
+    fn derive_host_state_session_connecting_wins_over_service_count() {
+        let mut st = make_state();
+        st.host.insert("t1".into(), "host".into());
+        assert_eq!(derive_host_state(&st, "t1", 1), "hosting");
+    }
+
+    #[test]
+    fn derive_host_state_external_when_service_has_connections() {
+        let st = make_state();
+        // No entry in st.host (this session is not hosting), but service reports connections.
+        assert_eq!(derive_host_state(&st, "t1", 2), "external");
+    }
+
+    #[test]
+    fn derive_host_state_idle_when_no_connections() {
+        let st = make_state();
+        assert_eq!(derive_host_state(&st, "t1", 0), "");
+    }
+
+    #[test]
+    fn derive_status_session_hosting_wins() {
+        let mut st = make_state();
+        st.host.insert("t1".into(), "hosting".into());
+        assert_eq!(derive_status(&st, "t1", 3000, 0), "host");
+    }
+
+    #[test]
+    fn derive_status_external_host_connections_gives_host_color() {
+        let st = make_state();
+        // service says hosted externally — dot should use "host" color
+        assert_eq!(derive_status(&st, "t1", 3000, 1), "host");
+    }
+
+    #[test]
+    fn derive_status_zero_connections_is_idle() {
+        let st = make_state();
+        assert_eq!(derive_status(&st, "t1", 3000, 0), "idle");
     }
 }
 

@@ -14,7 +14,7 @@ export struct PortRow {
     url: string,
     expiration: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"  (see theme.slint)
-    host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
+    host-state: string, // "" (not hosting) | "hosting" (this session) | "external" (another session)
 }
 
 // Status dot colored by state.
@@ -159,6 +159,9 @@ export component AppWindow inherits Window {
                                             ? Strings.badge-down
                                             : Strings.badge-provisioning));
                             }
+                            // "Hosted elsewhere": service reports active connections but this session is not hosting.
+                            if row.host-state == "external" :
+                            Pill { text: Strings.badge-hosted-external; }
                         }
                     }
 

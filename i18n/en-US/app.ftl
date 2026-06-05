@@ -74,6 +74,7 @@ badge-operational = Operational
 badge-service-down = Service down
 badge-down = Down
 badge-provisioning = Provisioning…
+badge-hosted-external = Hosted elsewhere
 
 ## Tray menu
 menu-open-window = Open window

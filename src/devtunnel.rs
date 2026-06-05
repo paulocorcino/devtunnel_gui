@@ -19,6 +19,9 @@ pub struct Row {
     pub protocol: String,
     pub url: String,
     pub expiration: String,
+    /// Active host connections reported by the service (`hostConnections` from `list -j`).
+    /// Non-zero means some session is hosting this tunnel (possibly not this app instance).
+    pub host_connections: i64,
 }
 
 /// Resolves the binary. Allows override via `DEVTUNNEL_BIN`; otherwise trusts PATH.
@@ -275,6 +278,7 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
         } else {
             t.name.clone()
         };
+        let host_connections = t.host_connections;
         match run_json::<ShowResult>(&["show", &t.tunnel_id, "-j"], loc) {
             Ok(show) => {
                 let exp = show.tunnel.tunnel_expiration;
@@ -286,6 +290,7 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
                         protocol: String::new(),
                         url: String::new(),
                         expiration: exp,
+                        host_connections,
                     });
                 } else {
                     for p in show.tunnel.ports {
@@ -296,6 +301,7 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
                             protocol: p.protocol,
                             url: p.port_uri.unwrap_or_default(),
                             expiration: exp.clone(),
+                            host_connections,
                         });
                     }
                 }
@@ -308,6 +314,7 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
                 protocol: String::new(),
                 url: String::new(),
                 expiration: t.tunnel_expiration,
+                host_connections,
             }),
         }
     }
