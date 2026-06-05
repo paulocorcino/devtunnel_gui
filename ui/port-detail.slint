@@ -1,0 +1,168 @@
+// Expandable per-port detail panel: a Metrics tab (up/down totals + rates,
+// active client connections) and a Logs tab (recent captured log lines).
+// All values arrive pre-formatted from Rust ("n/a" when unavailable).
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+
+// Small underlined tab toggle.
+component TabButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: 26px;
+    background: transparent;
+
+    VerticalLayout {
+        Text {
+            text: root.text;
+            color: root.active ? Theme.accent : Theme.muted;
+            font-size: Theme.fs-body;
+            font-weight: root.active ? 700 : 400;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+            vertical-stretch: 1;
+        }
+        Rectangle {
+            height: 2px;
+            background: root.active ? Theme.accent : transparent;
+        }
+    }
+
+    TouchArea {
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// One labeled metric value (label muted, value monospace).
+component MetricCell inherits VerticalLayout {
+    in property <string> label;
+    in property <string> value;
+    spacing: 2px;
+    Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: Theme.fs-caption;
+    }
+    Text {
+        text: root.value;
+        color: Theme.text;
+        font-size: Theme.fs-section;
+        font-family: Theme.mono;
+    }
+}
+
+export component PortDetailPanel inherits Rectangle {
+    in property <string> upload-total;
+    in property <string> upload-rate;
+    in property <string> download-total;
+    in property <string> download-rate;
+    in property <string> connections;
+    in property <[string]> log-lines;
+    // 0 = Metrics, 1 = Logs
+    in-out property <int> active-tab: 0;
+
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+
+    VerticalLayout {
+        padding: Theme.pad;
+        spacing: Theme.gap;
+
+        // ---- Tab bar ----
+        HorizontalLayout {
+            spacing: Theme.gap;
+            TabButton {
+                text: Strings.tab-metrics;
+                active: root.active-tab == 0;
+                clicked => {
+                    root.active-tab = 0;
+                }
+            }
+            TabButton {
+                text: Strings.tab-logs;
+                active: root.active-tab == 1;
+                clicked => {
+                    root.active-tab = 1;
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        // ---- Metrics tab ----
+        if root.active-tab == 0 : HorizontalLayout {
+            spacing: Theme.pad;
+            vertical-stretch: 1;
+            // Upload column
+            VerticalLayout {
+                spacing: Theme.gap;
+                alignment: start;
+                Text {
+                    text: Strings.metric-upload;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: 600;
+                }
+                MetricCell { label: Strings.metric-total; value: root.upload-total; }
+                MetricCell { label: Strings.metric-rate; value: root.upload-rate; }
+            }
+            // Download column
+            VerticalLayout {
+                spacing: Theme.gap;
+                alignment: start;
+                Text {
+                    text: Strings.metric-download;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: 600;
+                }
+                MetricCell { label: Strings.metric-total; value: root.download-total; }
+                MetricCell { label: Strings.metric-rate; value: root.download-rate; }
+            }
+            // Connections column
+            VerticalLayout {
+                spacing: Theme.gap;
+                alignment: start;
+                Text {
+                    text: Strings.metric-connections;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    font-weight: 600;
+                }
+                MetricCell { label: Strings.metric-active; value: root.connections; }
+            }
+            Rectangle { horizontal-stretch: 1; }
+        }
+
+        // ---- Logs tab ----
+        if root.active-tab == 1 : Rectangle {
+            vertical-stretch: 1;
+            background: Theme.surface-2;
+            border-width: 1px;
+            border-color: Theme.border;
+            border-radius: Theme.radius;
+
+            if root.log-lines.length == 0 : Text {
+                text: Strings.logs-empty;
+                color: Theme.muted;
+                font-size: Theme.fs-body;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+            if root.log-lines.length > 0 : ListView {
+                for line in root.log-lines : Text {
+                    text: line;
+                    color: Theme.text;
+                    font-size: Theme.fs-caption;
+                    font-family: Theme.mono;
+                    overflow: elide;
+                }
+            }
+        }
+    }
+}

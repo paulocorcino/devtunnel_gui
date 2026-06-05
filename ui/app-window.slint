@@ -3,6 +3,7 @@ import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
+import { PortDetailPanel } from "port-detail.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -68,6 +69,19 @@ export component AppWindow inherits Window {
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
 
+    // ---- Port detail panel (expanded row) ----
+    // Index of the expanded row in `rows`, -1 = collapsed. Owned by Rust:
+    // toggle-detail records the selection and recomputes this after reloads.
+    in-out property <int> selected-index: -1;
+    // Pre-formatted metric values for the selected port ("n/a" when missing).
+    in property <string> detail-upload-total: Strings.metric-na;
+    in property <string> detail-upload-rate: Strings.metric-na;
+    in property <string> detail-download-total: Strings.metric-na;
+    in property <string> detail-download-rate: Strings.metric-na;
+    in property <string> detail-connections: Strings.metric-na;
+    // Most recent captured log lines (oldest first).
+    in property <[string]> detail-logs;
+
     callback refresh();
     // Start / stop hosting a group (by Real Tunnel ID).
     callback host(string /*tunnel-id*/);
@@ -83,6 +97,8 @@ export component AppWindow inherits Window {
     callback request-delete-port(string /*group*/, string /*tunnel-id*/, int /*port*/);
     // User confirmed the pending deletion.
     callback confirm-accept();
+    // Row click: expand/collapse the detail panel for (index, tunnel-id, port).
+    callback toggle-detail(int /*index*/, string /*tunnel-id*/, int /*port*/);
 
     VerticalLayout {
         width: 100%;
@@ -129,15 +145,30 @@ export component AppWindow inherits Window {
 
         // ---- List ----
         ListView {
-            for row in root.rows : Rectangle {
-                height: 56px;
-                hover := TouchArea { }
-                background: hover.has-hover ? Theme.surface-2 : transparent;
+            for row[idx] in root.rows : Rectangle {
+                // Placeholder (provisioning) and portless rows have no metrics to show.
+                property <bool> expandable: row.tunnel-id != "" && row.port != 0;
+                property <bool> expanded: self.expandable && idx == root.selected-index;
+                height: self.expanded
+                    ? Theme.row-height + Theme.detail-height + Theme.gap
+                    : Theme.row-height;
 
-                HorizontalLayout {
-                    padding-left: Theme.pad;
-                    padding-right: Theme.pad;
-                    spacing: 10px;
+                VerticalLayout {
+                    Rectangle {
+                        height: Theme.row-height;
+                        hover := TouchArea {
+                            clicked => {
+                                if (expandable) {
+                                    root.toggle-detail(idx, row.tunnel-id, row.port);
+                                }
+                            }
+                        }
+                        background: hover.has-hover ? Theme.surface-2 : transparent;
+
+                        HorizontalLayout {
+                            padding-left: Theme.pad;
+                            padding-right: Theme.pad;
+                            spacing: 10px;
 
                     // status dot + health badge
                     VerticalLayout {
@@ -249,6 +280,23 @@ export component AppWindow inherits Window {
                                     root.request-delete-group(row.group, row.tunnel-id);
                                 }
                             }
+                        }
+                    }
+                }
+                    }
+
+                    // Inline detail panel under the selected row.
+                    if expanded : HorizontalLayout {
+                        padding-left: Theme.pad;
+                        padding-right: Theme.pad;
+                        PortDetailPanel {
+                            height: Theme.detail-height;
+                            upload-total: root.detail-upload-total;
+                            upload-rate: root.detail-upload-rate;
+                            download-total: root.detail-download-total;
+                            download-rate: root.detail-download-rate;
+                            connections: root.detail-connections;
+                            log-lines: root.detail-logs;
                         }
                     }
                 }
