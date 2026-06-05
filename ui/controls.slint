@@ -11,7 +11,7 @@ export component TxtButton inherits Rectangle {
     in property <bool> enabled: true;
     callback clicked();
 
-    height: 30px;
+    height: Theme.btn-height;
     border-radius: Theme.radius;
     border-width: root.primary ? 0px : 1px;
     border-color: root.danger ? Theme.down : Theme.border;
@@ -19,8 +19,8 @@ export component TxtButton inherits Rectangle {
     opacity: !root.enabled ? 0.45 : (ta.pressed ? 0.8 : (ta.has-hover ? 0.92 : 1.0));
 
     HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
+        padding-left: Theme.pad;
+        padding-right: Theme.pad;
         Text {
             text: root.text;
             color: root.primary ? Theme.accent-text : (root.danger ? Theme.down : Theme.text);
