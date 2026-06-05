@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 mod devtunnel;
+mod host;
 mod locale;
 mod model;
 
@@ -89,19 +90,21 @@ fn main() -> anyhow::Result<()> {
         let weak = app.as_weak();
         let tx = tx.clone();
         let loc = loc.clone();
-        app.on_create_group(move |name, expiration, anonymous, description, keep_headers, request_timeout| {
-            let opts = devtunnel::CreateGroupOpts {
-                name: name.to_string(),
-                expiration: expiration.to_string(),
-                anonymous,
-                description: description.to_string(),
-                keep_headers,
-                request_timeout: request_timeout.to_string(),
-            };
-            run_op_async(&weak, &tx, "status-creating-group", &loc, move |loc| {
-                devtunnel::create_group(&opts, loc).map(|_| ())
-            });
-        });
+        app.on_create_group(
+            move |name, expiration, anonymous, description, keep_headers, request_timeout| {
+                let opts = devtunnel::CreateGroupOpts {
+                    name: name.to_string(),
+                    expiration: expiration.to_string(),
+                    anonymous,
+                    description: description.to_string(),
+                    keep_headers,
+                    request_timeout: request_timeout.to_string(),
+                };
+                run_op_async(&weak, &tx, "status-creating-group", &loc, move |loc| {
+                    devtunnel::create_group(&opts, loc).map(|_| ())
+                });
+            },
+        );
     }
 
     // ---- Add port (creates the group inline when "+ New group…" was chosen) ----
@@ -109,36 +112,44 @@ fn main() -> anyhow::Result<()> {
         let weak = app.as_weak();
         let tx = tx.clone();
         let loc = loc.clone();
-        app.on_add_port(move |group_id, new_name, port, protocol, description, keep_headers, request_timeout| {
-            let group_id = group_id.to_string();
-            let new_name = new_name.to_string();
-            let port_num: i32 = port.trim().parse().unwrap_or(0);
-            let opts = devtunnel::CreatePortOpts {
-                port: port_num,
-                protocol: protocol.to_string(),
-                description: description.to_string(),
-                keep_headers,
-                request_timeout: request_timeout.to_string(),
-            };
-            run_op_async(&weak, &tx, "status-adding-port", &loc, move |loc| {
-                let tunnel_id = if group_id.is_empty() {
-                    devtunnel::create_group(
-                        &devtunnel::CreateGroupOpts {
-                            name: new_name,
-                            expiration: "30d".to_string(),
-                            anonymous: true,
-                            description: String::new(),
-                            keep_headers: false,
-                            request_timeout: String::new(),
-                        },
-                        loc,
-                    )?
-                } else {
-                    group_id
+        app.on_add_port(
+            move |group_id,
+                  new_name,
+                  port,
+                  protocol,
+                  description,
+                  keep_headers,
+                  request_timeout| {
+                let group_id = group_id.to_string();
+                let new_name = new_name.to_string();
+                let port_num: i32 = port.trim().parse().unwrap_or(0);
+                let opts = devtunnel::CreatePortOpts {
+                    port: port_num,
+                    protocol: protocol.to_string(),
+                    description: description.to_string(),
+                    keep_headers,
+                    request_timeout: request_timeout.to_string(),
                 };
-                devtunnel::create_port(&tunnel_id, &opts, loc)
-            });
-        });
+                run_op_async(&weak, &tx, "status-adding-port", &loc, move |loc| {
+                    let tunnel_id = if group_id.is_empty() {
+                        devtunnel::create_group(
+                            &devtunnel::CreateGroupOpts {
+                                name: new_name,
+                                expiration: "30d".to_string(),
+                                anonymous: true,
+                                description: String::new(),
+                                keep_headers: false,
+                                request_timeout: String::new(),
+                            },
+                            loc,
+                        )?
+                    } else {
+                        group_id
+                    };
+                    devtunnel::create_port(&tunnel_id, &opts, loc)
+                });
+            },
+        );
     }
 
     // ---- Request delete (opens the confirmation dialog) ----
@@ -208,30 +219,34 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
-        timer.start(slint::TimerMode::Repeated, Duration::from_millis(150), move || {
-            // Tray menu clicks.
-            while let Ok(ev) = menu_rx.try_recv() {
-                match actions.borrow().get(&ev.id) {
-                    Some(Action::Show) => show_window(&weak),
-                    Some(Action::Quit) => {
-                        let _ = slint::quit_event_loop();
+        timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_millis(150),
+            move || {
+                // Tray menu clicks.
+                while let Ok(ev) = menu_rx.try_recv() {
+                    match actions.borrow().get(&ev.id) {
+                        Some(Action::Show) => show_window(&weak),
+                        Some(Action::Quit) => {
+                            let _ = slint::quit_event_loop();
+                        }
+                        Some(Action::Copy(url)) => copy(url),
+                        Some(Action::Open(url)) => open_browser(url),
+                        None => {}
                     }
-                    Some(Action::Copy(url)) => copy(url),
-                    Some(Action::Open(url)) => open_browser(url),
-                    None => {}
                 }
-            }
-            // Tray icon click: toggle the window.
-            while let Ok(ev) = tray_rx.try_recv() {
-                if let TrayIconEvent::Click { .. } = ev {
-                    toggle_window(&weak);
+                // Tray icon click: toggle the window.
+                while let Ok(ev) = tray_rx.try_recv() {
+                    if let TrayIconEvent::Click { .. } = ev {
+                        toggle_window(&weak);
+                    }
                 }
-            }
-            // Load result: apply to UI and rebuild tray menu.
-            while let Ok(result) = rx.try_recv() {
-                apply_rows(&weak, &tray, &actions, result, &loc);
-            }
-        });
+                // Load result: apply to UI and rebuild tray menu.
+                while let Ok(result) = rx.try_recv() {
+                    apply_rows(&weak, &tray, &actions, result, &loc);
+                }
+            },
+        );
     }
 
     // ---- Initial load ----
@@ -277,7 +292,11 @@ fn open_browser(url: &str) {
 }
 
 /// Fires the fetch on a background thread; the result comes back via `Sender`.
-fn load_async(weak: &slint::Weak<AppWindow>, tx: &Sender<anyhow::Result<Vec<devtunnel::Row>>>, loc: &Rc<Locale>) {
+fn load_async(
+    weak: &slint::Weak<AppWindow>,
+    tx: &Sender<anyhow::Result<Vec<devtunnel::Row>>>,
+    loc: &Rc<Locale>,
+) {
     if let Some(a) = weak.upgrade() {
         a.set_status(loc.t("status-refreshing").into());
     }

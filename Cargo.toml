@@ -22,9 +22,15 @@ tunnels = { git = "https://github.com/microsoft/dev-tunnels", features = ["conne
 tokio = { version = "1", features = ["full"], optional = true }
 env_logger = { version = "0.11", optional = true }
 log = { version = "0.4", optional = true }
+# Blocking HTTP client for the health probe (issue #4). rustls avoids a native
+# OpenSSL dependency for the probe itself. Optional: only pulled by `hosting`.
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
 [features]
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger", "dep:log"]
+# Integrated SDK hosting + health probe (issue #4). Kept gated so the default
+# `cargo build` stays light (no vendored OpenSSL / heavy toolchain).
+hosting = ["dep:tunnels", "dep:tokio", "dep:ureq", "dep:log"]
 
 [[bin]]
 name = "devtunnel_gui"

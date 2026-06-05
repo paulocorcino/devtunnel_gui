@@ -79,14 +79,11 @@ pub fn sanitize_tunnel_id(name: &str) -> String {
 /// Used for operations whose JSON payload the UI does not consume.
 fn run_ok(args: &[&str], loc: &Locale) -> Result<()> {
     let joined = args.join(" ");
-    let output = Command::new(bin())
-        .args(args)
-        .output()
-        .with_context(|| {
-            let mut a = FluentArgs::new();
-            a.set("args", joined.clone());
-            loc.t_args("err-cli-not-found", &a)
-        })?;
+    let output = Command::new(bin()).args(args).output().with_context(|| {
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        loc.t_args("err-cli-not-found", &a)
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -183,16 +180,60 @@ pub fn delete_port(tunnel_id: &str, port: i32, loc: &Locale) -> Result<()> {
     run_ok(&["port", "delete", tunnel_id, "-p", &port, "-j"], loc)
 }
 
-fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
+/// Mints an access token for a tunnel via `devtunnel token <id> --scopes <scope> -j`,
+/// returning the raw token string. Mint one scope at a time: repeating `--scopes`
+/// on the CLI corrupts the first value. Used by the host engine (`host` scope to
+/// connect to the relay, `manage:ports` so the SDK can create ports).
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn mint_token(full_id: &str, scope: &str, loc: &Locale) -> Result<String> {
+    let args = ["token", full_id, "--scopes", scope, "-j"];
     let joined = args.join(" ");
-    let output = Command::new(bin())
-        .args(args)
-        .output()
-        .with_context(|| {
+    let output = Command::new(bin()).args(args).output().with_context(|| {
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        loc.t_args("err-cli-not-found", &a)
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        a.set("stderr", stderr.trim().to_string());
+        return Err(anyhow!("{}", loc.t_args("err-cli-failed", &a)));
+    }
+
+    let v: serde_json::Value = serde_json::from_slice(&output.stdout).with_context(|| {
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        loc.t_args("err-cli-invalid-json", &a)
+    })?;
+    v.get("token")
+        .and_then(|t| t.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| {
             let mut a = FluentArgs::new();
             a.set("args", joined.clone());
-            loc.t_args("err-cli-not-found", &a)
-        })?;
+            anyhow!("{}", loc.t_args("err-cli-invalid-json", &a))
+        })
+}
+
+/// Splits a full Tunnel ID of the form `id.cluster` (e.g. `frontend-3000.brs`)
+/// into `(cluster, id)`, the shape the SDK `TunnelLocator::ID` expects. Splits at
+/// the last `.`. Returns `None` when no cluster suffix is present.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn split_locator(full_id: &str) -> Option<(String, String)> {
+    full_id
+        .rsplit_once('.')
+        .map(|(id, cluster)| (cluster.to_string(), id.to_string()))
+}
+
+fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
+    let joined = args.join(" ");
+    let output = Command::new(bin()).args(args).output().with_context(|| {
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        loc.t_args("err-cli-not-found", &a)
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
