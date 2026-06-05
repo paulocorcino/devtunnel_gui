@@ -11,16 +11,6 @@ use std::thread;
 use std::time::Duration;
 
 // ---------------------------------------------------------------------------
-// Provisional relay-error body markers.
-// These string fragments are expected in the HTML body of the devtunnels relay
-// error page when the upstream local service is unreachable (HTTP 502/503).
-// The exact values will be confirmed empirically in Stage 5 (HITL) and updated
-// in src/probe.rs without changing the classify() signature.
-// ---------------------------------------------------------------------------
-const RELAY_ERROR_MARKERS: &[&str] =
-    &["devtunnels", "tunnel", "Bad Gateway", "Service Unavailable"];
-
-// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -65,30 +55,28 @@ pub struct ProbeTarget {
 // Pure classifier (unit-tested below)
 // ---------------------------------------------------------------------------
 
-/// Classify a probe result into a `ProbeState`.
+/// Classify a probe result into a `ProbeState`, based purely on the HTTP status.
 ///
 /// * `status` — HTTP status code returned by `ureq`, or `None` on I/O / network error.
-/// * `body`   — Response body text (may be empty or partial; used only for 502/503).
 ///
 /// # Classification logic
-/// - `None` (network/timeout error)         → `Down`
-/// - 502 or 503 **and** body contains a relay-error marker → `ServiceDown`
-/// - 502 or 503 with no marker in the body  → `Down` (conservative: unknown relay behaviour)
-/// - 2xx or any other status code           → `Operational`
-pub fn classify(status: Option<u16>, body: &str) -> ProbeState {
+/// - `None` (network/timeout/DNS error) → `Down` — the Public URL is unreachable
+///   (relay down, or the group is not hosted at all).
+/// - `502` / `503` / `504` → `ServiceDown` — the devtunnels relay was reached but
+///   could not get a valid response from the local upstream. Confirmed empirically
+///   in Stage 5: a port configured `https` while the local server speaks plain HTTP
+///   returns a relay **502** even though the local service is up. These gateway
+///   codes are emitted by the relay, not the app, so the status alone is a reliable
+///   signal — no body-string matching needed.
+/// - Any other status (2xx/3xx/4xx) → `Operational` — the relay routed to the
+///   upstream and it answered. A 401/404 here is the *local app's* own response,
+///   i.e. the service is reachable. (Edge case: if the host connection silently
+///   dropped, the relay can answer 404 itself; in practice a dropped host emits a
+///   HostEvent that clears the probe state before this matters.)
+pub fn classify(status: Option<u16>) -> ProbeState {
     match status {
         None => ProbeState::Down,
-        Some(code) if code == 502 || code == 503 => {
-            let body_lower = body.to_lowercase();
-            let is_relay_error = RELAY_ERROR_MARKERS
-                .iter()
-                .any(|marker| body_lower.contains(&marker.to_lowercase()));
-            if is_relay_error {
-                ProbeState::ServiceDown
-            } else {
-                ProbeState::Down
-            }
-        }
+        Some(502) | Some(503) | Some(504) => ProbeState::ServiceDown,
         Some(_) => ProbeState::Operational,
     }
 }
@@ -131,22 +119,16 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
                     }
                 }
 
-                // Probe every target.
+                // Probe every target. Only the status code matters for the 3-state
+                // classification, so the response body is not downloaded.
                 for target in &targets {
-                    let (status, body) = match agent.get(&target.url).call() {
-                        Ok(resp) => {
-                            let code = resp.status();
-                            let text = resp.into_string().unwrap_or_default();
-                            (Some(code), text)
-                        }
-                        Err(ureq::Error::Status(code, resp)) => {
-                            let text = resp.into_string().unwrap_or_default();
-                            (Some(code), text)
-                        }
-                        Err(_) => (None, String::new()),
+                    let status = match agent.get(&target.url).call() {
+                        Ok(resp) => Some(resp.status()),
+                        Err(ureq::Error::Status(code, _)) => Some(code),
+                        Err(_) => None,
                     };
 
-                    let state = classify(status, &body);
+                    let state = classify(status);
                     let _ = events.send(ProbeEvent::Status {
                         tunnel_id: target.tunnel_id.clone(),
                         port: target.port,
@@ -190,36 +172,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_operational_on_2xx() {
-        assert_eq!(classify(Some(200), ""), ProbeState::Operational);
-        assert_eq!(classify(Some(204), ""), ProbeState::Operational);
-        assert_eq!(classify(Some(301), ""), ProbeState::Operational);
-        assert_eq!(classify(Some(404), ""), ProbeState::Operational);
+    fn classify_operational_on_2xx_3xx() {
+        assert_eq!(classify(Some(200)), ProbeState::Operational);
+        assert_eq!(classify(Some(204)), ProbeState::Operational);
+        assert_eq!(classify(Some(301)), ProbeState::Operational);
     }
 
     #[test]
-    fn classify_service_down_on_relay_502() {
-        let relay_body = "Error: devtunnels relay could not reach the upstream tunnel service";
-        assert_eq!(classify(Some(502), relay_body), ProbeState::ServiceDown);
+    fn classify_operational_on_app_4xx() {
+        // A 401/404 here is the local app's own response: the service is reachable
+        // through the relay, so the tunnel is Operational.
+        assert_eq!(classify(Some(401)), ProbeState::Operational);
+        assert_eq!(classify(Some(404)), ProbeState::Operational);
     }
 
     #[test]
-    fn classify_service_down_on_relay_503() {
-        let relay_body = "Service Unavailable: the tunnel endpoint is not responding";
-        assert_eq!(classify(Some(503), relay_body), ProbeState::ServiceDown);
+    fn classify_service_down_on_gateway_errors() {
+        // Relay-emitted gateway errors mean the upstream local service is unreachable
+        // (confirmed in Stage 5 via an https-port / http-server protocol mismatch).
+        assert_eq!(classify(Some(502)), ProbeState::ServiceDown);
+        assert_eq!(classify(Some(503)), ProbeState::ServiceDown);
+        assert_eq!(classify(Some(504)), ProbeState::ServiceDown);
     }
 
     #[test]
     fn classify_down_on_network_error() {
-        assert_eq!(classify(None, ""), ProbeState::Down);
-    }
-
-    #[test]
-    fn classify_down_on_502_without_relay_marker() {
-        // A generic 502 (not from the devtunnels relay) should fall back to Down.
-        assert_eq!(
-            classify(Some(502), "some generic proxy error"),
-            ProbeState::Down
-        );
+        assert_eq!(classify(None), ProbeState::Down);
     }
 }
