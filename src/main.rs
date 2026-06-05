@@ -217,6 +217,35 @@ fn main() -> anyhow::Result<()> {
     #[cfg(feature = "hosting")]
     app.set_hosting_enabled(true);
 
+    // ---- Settings: auto-start (start with Windows) ----
+    // The registry is the source of truth for the checkbox (the user may have
+    // removed the Run entry externally); the persisted setting follows it.
+    #[cfg(windows)]
+    {
+        let enabled = autostart::is_enabled();
+        app.set_auto_start_enabled(enabled);
+        app_state.borrow_mut().settings.auto_start = enabled;
+    }
+    {
+        let app_state = app_state.clone();
+        app.on_auto_start_changed(move |enabled| {
+            #[cfg(windows)]
+            {
+                let result = if enabled {
+                    autostart::enable()
+                } else {
+                    autostart::disable()
+                };
+                if let Err(e) = result {
+                    log::warn!("autostart: failed to apply toggle: {e}");
+                }
+            }
+            let mut st = app_state.borrow_mut();
+            st.settings.auto_start = enabled;
+            st.save();
+        });
+    }
+
     // ---- UI callbacks ----
     app.on_copy_url(|url| copy(&url));
     app.on_open_url(|url| open_browser(&url));

@@ -1,0 +1,67 @@
+// Settings dialog (issue #5): a minimal modal surface for app-level options.
+// Follows the same backdrop-plus-card pattern as the dialogs in dialogs.slint;
+// visibility is driven by the `open` property bound from AppWindow.
+import { CheckBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+
+export component SettingsDialog inherits Rectangle {
+    in-out property <bool> open;
+    // Current "start with Windows" state; set from Rust before opening and
+    // toggled by the checkbox (Rust applies the registry change).
+    in-out property <bool> auto-start;
+    callback auto-start-changed(bool);
+
+    visible: root.open;
+    background: #00000099;
+
+    // Absorb clicks on the backdrop.
+    TouchArea { }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 360px;
+        background: Theme.surface-2;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.radius;
+
+        // Keep clicks inside the card from reaching the backdrop.
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 16px;
+
+            Text {
+                text: Strings.settings-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 700;
+            }
+
+            CheckBox {
+                text: Strings.field-auto-start;
+                checked: root.auto-start;
+                toggled => {
+                    root.auto-start = self.checked;
+                    root.auto-start-changed(self.checked);
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                TxtButton {
+                    text: Strings.btn-close;
+                    primary: true;
+                    clicked => {
+                        root.open = false;
+                    }
+                }
+            }
+        }
+    }
+}
