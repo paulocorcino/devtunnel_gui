@@ -458,7 +458,10 @@ fn main() -> anyhow::Result<()> {
 
     // Start minimized to tray: never call `show()`, just run the event loop.
     // The window appears via tray icon click or the "Open window" menu item.
-    slint::run_event_loop()?;
+    // Use the "until quit" variant so the app stays alive when the (only) window
+    // is hidden to the tray — otherwise Slint's quit-on-last-window-closed would
+    // terminate the whole process the moment the window is closed/hidden.
+    slint::run_event_loop_until_quit()?;
     Ok(())
 }
 
