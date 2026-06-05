@@ -33,6 +33,10 @@ enum Action {
     Open(String),
 }
 
+/// Status id assigned to optimistic placeholder rows (see [`rebuild_rows`]).
+/// Drives the "Provisioning…" badge and disables the row's action buttons.
+const PROVISIONING_STATUS: &str = "provisioning";
+
 /// A deletion awaiting user confirmation. `port == None` means delete the whole group.
 struct PendingDelete {
     tunnel_id: String,
@@ -815,7 +819,7 @@ fn rebuild_rows(
             protocol: p.protocol.clone().into(),
             url: SharedString::new(),
             expiration: SharedString::new(),
-            status: "provisioning".into(),
+            status: PROVISIONING_STATUS.into(),
             host_state: SharedString::new(),
         });
     }
@@ -1072,14 +1076,16 @@ mod tests {
         let real_row_status = derive_status(&st, "tid1", 9000);
         assert_eq!(real_row_status, "idle");
 
-        // Push a placeholder and check it appears as a "provisioning" row.
+        // Push a placeholder; its fields are what `rebuild_rows` turns into a row.
         let id = st.push_placeholder("new-group".into(), 4000, "tcp".into());
         assert_eq!(st.placeholders.len(), 1);
         assert_eq!(st.placeholders[0].port, 4000);
+        assert_eq!(st.placeholders[0].group, "new-group");
+        assert_eq!(st.placeholders[0].protocol, "tcp");
 
-        // The row derived from the placeholder should use status "provisioning".
-        let prow_status = "provisioning"; // as assigned in rebuild_rows
-        assert_eq!(prow_status, "provisioning");
+        // `rebuild_rows` assigns this id to every placeholder row, which the
+        // theme/UI render as the "Provisioning…" badge.
+        assert_eq!(PROVISIONING_STATUS, "provisioning");
 
         // After removal the placeholder list is empty again.
         st.remove_placeholder(id);
