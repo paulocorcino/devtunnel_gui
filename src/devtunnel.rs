@@ -243,12 +243,24 @@ fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
         return Err(anyhow!("{}", loc.t_args("err-cli-failed", &a)));
     }
 
-    // The CLI sometimes prints blank lines before the JSON; serde ignores leading whitespace.
-    serde_json::from_slice(&output.stdout).with_context(|| {
-        let mut a = FluentArgs::new();
-        a.set("args", joined.clone());
-        loc.t_args("err-cli-invalid-json", &a)
-    })
+    // The CLI can wrap its JSON in extra text (e.g. an intermittent "update
+    // available" notice or a banner), which made parsing the whole stdout fail
+    // transiently — typically right after a mutating command. Locate the first
+    // JSON value (`{`/`[`) and parse just that, ignoring any leading/trailing noise.
+    let stdout = &output.stdout;
+    let start = stdout
+        .iter()
+        .position(|&b| b == b'{' || b == b'[')
+        .unwrap_or(0);
+    let mut stream = serde_json::Deserializer::from_slice(&stdout[start..]).into_iter::<T>();
+    match stream.next() {
+        Some(Ok(value)) => Ok(value),
+        _ => {
+            let mut a = FluentArgs::new();
+            a.set("args", joined.clone());
+            Err(anyhow!("{}", loc.t_args("err-cli-invalid-json", &a)))
+        }
+    }
 }
 
 /// Enumerates tunnels (`list -j`) and, for each one, fetches ports + URLs (`show -j`).
