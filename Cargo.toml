@@ -15,16 +15,25 @@ fluent-bundle = "0.15"
 open = "5"
 sys-locale = "0.3"
 unic-langid = "0.9"
+# Lightweight logging facade — always linked so `log::` macros compile in the
+# default build too (they are no-ops until a logger is installed, which only the
+# `hosting`/`spike` builds do via env_logger).
+log = "0.4"
 
 # Spike #2 (HITL): native hosting via SDK. Isolated behind the `spike` feature
 # to avoid adding build weight to the GUI until the SDK-vs-fallback decision is settled.
 tunnels = { git = "https://github.com/microsoft/dev-tunnels", features = ["connections", "vendored-openssl"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 env_logger = { version = "0.11", optional = true }
-log = { version = "0.4", optional = true }
+# Blocking HTTP client for the health probe (issue #4). rustls avoids a native
+# OpenSSL dependency for the probe itself. Optional: only pulled by `hosting`.
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
 [features]
-spike = ["dep:tunnels", "dep:tokio", "dep:env_logger", "dep:log"]
+spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
+# Integrated SDK hosting + health probe (issue #4). Kept gated so the default
+# `cargo build` stays light (no vendored OpenSSL / heavy toolchain).
+hosting = ["dep:tunnels", "dep:tokio", "dep:ureq", "dep:env_logger"]
 
 [[bin]]
 name = "devtunnel_gui"

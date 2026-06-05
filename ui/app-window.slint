@@ -1,6 +1,8 @@
 import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -12,6 +14,7 @@ export struct PortRow {
     url: string,
     expiration: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host"  (see theme.slint)
+    host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
 }
 
 // Status dot colored by state.
@@ -43,40 +46,6 @@ component Pill inherits Rectangle {
     }
 }
 
-// Themed text button (primary filled / ghost outline).
-component TxtButton inherits Rectangle {
-    in property <string> text;
-    in property <bool> primary: false;
-    in property <bool> enabled: true;
-    callback clicked();
-
-    height: 30px;
-    border-radius: Theme.radius;
-    border-width: root.primary ? 0px : 1px;
-    border-color: Theme.border;
-    background: root.primary ? Theme.accent : Theme.surface;
-    opacity: !root.enabled ? 0.45 : (ta.pressed ? 0.8 : (ta.has-hover ? 0.92 : 1.0));
-
-    HorizontalLayout {
-        padding-left: 12px;
-        padding-right: 12px;
-        Text {
-            text: root.text;
-            color: root.primary ? Theme.accent-text : Theme.text;
-            font-size: Theme.fs-body;
-            vertical-alignment: center;
-            horizontal-alignment: center;
-        }
-    }
-
-    ta := TouchArea {
-        enabled: root.enabled;
-        clicked => {
-            root.clicked();
-        }
-    }
-}
-
 export component AppWindow inherits Window {
     title: "DevTunnel GUI";
     preferred-width: 820px;
@@ -87,12 +56,37 @@ export component AppWindow inherits Window {
 
     in property <[PortRow]> rows;
     in property <string> status: Strings.status-loading;
+    // Group picker data for the "Add port" dialog (parallel arrays; the
+    // "+ New group…" entry is last, with an empty id).
+    in property <[string]> group-names;
+    in property <[string]> group-ids;
+
+    in-out property <bool> show-create-group;
+    in-out property <bool> show-add-port;
+    in-out property <bool> show-confirm;
+
+    // True only in the `hosting` build; gates the per-group Host/Stop toggle.
+    in property <bool> hosting-enabled: false;
 
     callback refresh();
+    // Start / stop hosting a group (by Real Tunnel ID).
+    callback host(string /*tunnel-id*/);
+    callback stop(string /*tunnel-id*/);
     callback copy-url(string);
     callback open-url(string);
+    callback create-group(string /*name*/, string /*expiration*/, bool /*anonymous*/,
+                          string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
+    callback add-port(string /*group-id*/, string /*new-name*/, string /*port*/,
+                      string /*protocol*/, string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
+    // Open the confirmation dialog (Rust composes the localized message + remembers the target).
+    callback request-delete-group(string /*name*/, string /*tunnel-id*/);
+    callback request-delete-port(string /*group*/, string /*tunnel-id*/, int /*port*/);
+    // User confirmed the pending deletion.
+    callback confirm-accept();
 
     VerticalLayout {
+        width: 100%;
+        height: 100%;
         // ---- Top bar ----
         Rectangle {
             background: Theme.surface;
@@ -110,6 +104,18 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Pill { text: root.status; }
+                TxtButton {
+                    text: Strings.btn-new-group;
+                    clicked => {
+                        root.show-create-group = true;
+                    }
+                }
+                TxtButton {
+                    text: Strings.btn-add-port;
+                    clicked => {
+                        root.show-add-port = true;
+                    }
+                }
                 TxtButton {
                     text: Strings.btn-refresh;
                     primary: true;
@@ -133,10 +139,25 @@ export component AppWindow inherits Window {
                     padding-right: Theme.pad;
                     spacing: 10px;
 
-                    // status
+                    // status dot + health badge
                     VerticalLayout {
                         alignment: center;
-                        StatusDot { status: row.status; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                StatusDot { status: row.status; }
+                            }
+                            // Localized badge label for the 3 health states; hidden when idle/host.
+                            if row.status == "ok" || row.status == "warn" || row.status == "down" :
+                            Pill {
+                                text: row.status == "ok"
+                                    ? Strings.badge-operational
+                                    : (row.status == "warn"
+                                        ? Strings.badge-service-down
+                                        : Strings.badge-down);
+                            }
+                        }
                     }
 
                     // port + url + meta
@@ -177,6 +198,23 @@ export component AppWindow inherits Window {
                         alignment: center;
                         HorizontalLayout {
                             spacing: 6px;
+                            // Per-group Host/Stop toggle. Disabled in the default
+                            // (non-hosting) build; label reflects the group state.
+                            TxtButton {
+                                text: row.host-state == "hosting" ? Strings.btn-stop : Strings.btn-host;
+                                primary: row.host-state != "hosting";
+                                // Hosting a group with no port forwards nothing, so only
+                                // enable Host when the group has a port (or to Stop an
+                                // already-hosting group). A port==0 row is a portless group.
+                                enabled: root.hosting-enabled && (row.port != 0 || row.host-state == "hosting");
+                                clicked => {
+                                    if (row.host-state == "hosting") {
+                                        root.stop(row.tunnel-id);
+                                    } else {
+                                        root.host(row.tunnel-id);
+                                    }
+                                }
+                            }
                             TxtButton {
                                 text: Strings.btn-copy;
                                 enabled: row.url != "";
@@ -191,10 +229,54 @@ export component AppWindow inherits Window {
                                     root.open-url(row.url);
                                 }
                             }
+                            TxtButton {
+                                text: Strings.btn-del-port;
+                                danger: true;
+                                // A port==0 row is a group with no ports yet.
+                                enabled: row.port != 0;
+                                clicked => {
+                                    root.request-delete-port(row.group, row.tunnel-id, row.port);
+                                }
+                            }
+                            TxtButton {
+                                text: Strings.btn-del-group;
+                                danger: true;
+                                clicked => {
+                                    root.request-delete-group(row.group, row.tunnel-id);
+                                }
+                            }
                         }
                     }
                 }
             }
+        }
+    }
+
+    // ---- Modal overlays (drawn on top of the content) ----
+    CreateGroupDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-create-group;
+        submit(name, expiration, anonymous, description, keep-headers, request-timeout) => {
+            root.create-group(name, expiration, anonymous, description, keep-headers, request-timeout);
+        }
+    }
+    AddPortDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-add-port;
+        group-names: root.group-names;
+        group-ids: root.group-ids;
+        submit(group-id, new-name, port, protocol, description, keep-headers, request-timeout) => {
+            root.add-port(group-id, new-name, port, protocol, description, keep-headers, request-timeout);
+        }
+    }
+    ConfirmDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-confirm;
+        accept => {
+            root.confirm-accept();
         }
     }
 }

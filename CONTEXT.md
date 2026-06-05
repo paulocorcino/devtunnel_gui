@@ -42,10 +42,14 @@ Responsibility of the SDK running in-process. Distinct from the health probe.
 ### Health probe (Operational)
 A periodic HTTP probe against the Public URLs of **hosted** groups, classifying
 them into **3 states**:
-- **Operational:** relay routing AND local service responded.
-- **Tunnel ok, service down:** relay responds but upstream dead (e.g. 502/503 with
-  devtunnels error page). *Exact signature to confirm during implementation.*
-- **Down:** URL unreachable / group not hosted.
+- **Operational:** relay routed to the upstream and it answered (any 2xx/3xx, and
+  also app-level 4xx like 401/404 — the service is reachable).
+- **Tunnel ok, service down:** relay reached but upstream unreachable — confirmed
+  empirically (Stage 5) as a relay-emitted **HTTP 502/503/504**. Reproduced by hosting
+  a port configured `https` while the local server speaks plain HTTP: the local service
+  is up but the relay returns 502. Classification is by status code alone (the gateway
+  codes are emitted by the relay, not the app), so no body-string matching is needed.
+- **Down:** URL unreachable (network/timeout/DNS error) — relay down or group not hosted.
 
 Method: GET `/`, timeout ~5s, interval **configurable, conservative default 60s**,
 only for active groups. Works because tunnels use **anonymous access** (an
