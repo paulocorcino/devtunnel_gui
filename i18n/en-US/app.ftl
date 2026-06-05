@@ -75,6 +75,15 @@ badge-service-down = Service down
 badge-down = Down
 badge-provisioning = Provisioning…
 
+## Preflight banner / re-login
+banner-cli-missing-title = Dev Tunnels CLI not found
+banner-cli-missing-body = The `devtunnel` CLI is required but was not found on PATH.
+banner-cli-missing-install = Install it with: winget install Microsoft.devtunnel — or set DEVTUNNEL_BIN to the executable path.
+banner-relogin-title = Sign in required
+banner-relogin-body = Your Dev Tunnels login is missing or has expired. Sign in to continue.
+btn-sign-in = Sign in
+status-signing-in = signing in…
+
 ## Tray menu
 menu-open-window = Open window
 menu-copy-url = Copy URL
