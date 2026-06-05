@@ -453,7 +453,10 @@ Log "Queue: $($issues.Count) issue(s) in order: $((($issues | ForEach-Object { '
 # Skip issues that already have an OPEN PR (delivered/in-review); incomplete
 # branches without a PR are resumed.
 $openPrHeads = @()
-if (-not $NoPublish) { $openPrHeads = (gh pr list --state open --json headRefName | ConvertFrom-Json).headRefName }
+if (-not $NoPublish) {
+    $prs = gh pr list --state open --json headRefName | ConvertFrom-Json
+    if ($prs) { $openPrHeads = @($prs.headRefName) }   # empty when there are no open PRs
+}
 
 foreach ($issue in $issues) {
     if ((Get-Date) -ge $Deadline) { Log "DEADLINE reached. Stopping."; break }
