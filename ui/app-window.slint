@@ -203,7 +203,10 @@ export component AppWindow inherits Window {
                             TxtButton {
                                 text: row.host-state == "hosting" ? Strings.btn-stop : Strings.btn-host;
                                 primary: row.host-state != "hosting";
-                                enabled: root.hosting-enabled;
+                                // Hosting a group with no port forwards nothing, so only
+                                // enable Host when the group has a port (or to Stop an
+                                // already-hosting group). A port==0 row is a portless group.
+                                enabled: root.hosting-enabled && (row.port != 0 || row.host-state == "hosting");
                                 clicked => {
                                     if (row.host-state == "hosting") {
                                         root.stop(row.tunnel-id);
