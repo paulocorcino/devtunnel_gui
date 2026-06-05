@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 /// File name of the persisted state inside [`state_dir`].
 const STATE_FILE: &str = "state.json";
+/// File name of the last-successful-load row cache inside [`state_dir`].
+const CACHE_FILE: &str = "cache.json";
 
 /// User-tunable settings persisted across runs.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -73,17 +75,7 @@ impl AppState {
     /// Saves the state to `path` atomically (temp file + rename). Best-effort:
     /// errors are returned for the caller to log, never to abort the app.
     pub fn save_to(&self, path: &Path) -> anyhow::Result<()> {
-        if let Some(dir) = path.parent() {
-            fs::create_dir_all(dir)?;
-        }
-        let json = serde_json::to_string_pretty(self)?;
-        let tmp = path.with_extension("json.tmp");
-        fs::write(&tmp, json)?;
-        // `rename` replaces the destination atomically on the same volume.
-        // On Windows it fails if the destination exists, so remove it first.
-        let _ = fs::remove_file(path);
-        fs::rename(&tmp, path)?;
-        Ok(())
+        atomic_write(path, &serde_json::to_string_pretty(self)?)
     }
 
     /// Loads the state from the default location ([`state_path`]).
@@ -112,6 +104,54 @@ pub fn state_dir() -> PathBuf {
 /// Full path of the persisted state file.
 pub fn state_path() -> PathBuf {
     state_dir().join(STATE_FILE)
+}
+
+/// Full path of the row cache file.
+pub fn cache_path() -> PathBuf {
+    state_dir().join(CACHE_FILE)
+}
+
+/// Writes `content` to `path` atomically: temp file in the same directory,
+/// then rename. A crash mid-write can never truncate the destination.
+fn atomic_write(path: &Path, content: &str) -> anyhow::Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, content)?;
+    // `rename` replaces the destination atomically on the same volume.
+    // On Windows it fails if the destination exists, so remove it first.
+    let _ = fs::remove_file(path);
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Loads the cached rows from the last successful load. Missing or invalid
+/// content yields an empty list (the async refresh reconciles shortly after).
+pub fn load_row_cache() -> Vec<crate::devtunnel::Row> {
+    load_row_cache_from(&cache_path())
+}
+
+fn load_row_cache_from(path: &Path) -> Vec<crate::devtunnel::Row> {
+    match fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Persists the rows of a successful load so the next startup can paint the
+/// list immediately. Best-effort: failures are logged, never propagated.
+pub fn save_row_cache(rows: &[crate::devtunnel::Row]) {
+    save_row_cache_to(&cache_path(), rows);
+}
+
+fn save_row_cache_to(path: &Path, rows: &[crate::devtunnel::Row]) {
+    let result = serde_json::to_string(rows)
+        .map_err(anyhow::Error::from)
+        .and_then(|json| atomic_write(path, &json));
+    if let Err(e) = result {
+        log::warn!("state: failed to save row cache {}: {e}", path.display());
+    }
 }
 
 #[cfg(test)]
@@ -179,6 +219,38 @@ mod tests {
         let st = AppState::load_from(&path);
         assert!(st.contains_auto_host("x.brs"));
         assert_eq!(st.settings, Settings::default());
+    }
+
+    #[test]
+    fn row_cache_round_trip_and_default_on_missing() {
+        let dir = std::env::temp_dir().join(format!(
+            "devtunnel-gui-test-{}-rowcache",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CACHE_FILE);
+
+        // Missing file -> empty list.
+        let _ = fs::remove_file(&path);
+        assert!(load_row_cache_from(&path).is_empty());
+
+        let rows = vec![crate::devtunnel::Row {
+            group: "frontend".into(),
+            tunnel_id: "frontend.brs".into(),
+            port: 3000,
+            protocol: "http".into(),
+            url: "https://frontend-3000.brs.devtunnels.ms/".into(),
+            expiration: "30d".into(),
+        }];
+        save_row_cache_to(&path, &rows);
+        let loaded = load_row_cache_from(&path);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].tunnel_id, "frontend.brs");
+        assert_eq!(loaded[0].port, 3000);
+
+        // Invalid content -> empty list.
+        fs::write(&path, "garbage").unwrap();
+        assert!(load_row_cache_from(&path).is_empty());
     }
 
     #[test]

@@ -9,7 +9,9 @@ use fluent_bundle::FluentArgs;
 use serde::de::DeserializeOwned;
 use std::process::Command;
 
-/// A flattened port with its URL, ready for the UI.
+/// A flattened port with its URL, ready for the UI. Serde derives support the
+/// startup row cache (`state::save_row_cache` / `state::load_row_cache`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     /// Friendly group name (falls back to tunnel_id when the tunnel has no name).
     pub group: String,

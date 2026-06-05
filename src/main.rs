@@ -193,6 +193,10 @@ fn main() -> anyhow::Result<()> {
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
 
+    // Persistent app state (auto-host set + settings), loaded once on startup and
+    // saved best-effort whenever the auto-host set or settings change.
+    let app_state: Rc<RefCell<state::AppState>> = Rc::new(RefCell::new(state::AppState::load()));
+
     // ---- Host + probe engines ----
     // The host engine starts in every build (it is a no-op without `hosting`);
     // the probe engine only exists in the `hosting` build. Both communicate with
@@ -413,11 +417,18 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let app_state = app_state.clone();
         app.on_host(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Host {
                 tunnel_id: id.clone(),
             });
+            // Track the group as auto-host so it is re-hosted on next startup.
+            {
+                let mut st = app_state.borrow_mut();
+                st.add_auto_host(&id);
+                st.save();
+            }
             state.borrow_mut().host.insert(id, "host".to_string());
             if let Some(a) = weak.upgrade() {
                 rebuild_rows(&a, &tray, &actions, &state, &loc);
@@ -431,11 +442,18 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let app_state = app_state.clone();
         app.on_stop(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Stop {
                 tunnel_id: id.clone(),
             });
+            // An explicit Stop removes the group from the auto-host set.
+            {
+                let mut st = app_state.borrow_mut();
+                st.remove_auto_host(&id);
+                st.save();
+            }
             let mut st = state.borrow_mut();
             st.host.remove(&id);
             // Drop probe results for this group's ports so badges clear.
@@ -555,6 +573,16 @@ fn main() -> anyhow::Result<()> {
                 }
             },
         );
+    }
+
+    // ---- Initial paint from the row cache (last successful load), then the
+    // async refresh reconciles from the service. Keeps the UI useful instantly.
+    {
+        let cached = state::load_row_cache();
+        if !cached.is_empty() {
+            state.borrow_mut().rows = cached;
+            rebuild_rows(&app, &tray, &actions, &state, &loc);
+        }
     }
 
     // ---- Initial load ----
@@ -685,6 +713,8 @@ fn apply_rows(
 
             // Cache the load and rebuild the row model (status/host-state derived
             // from the latest probe/host events), then refresh probe targets.
+            // Also persist the rows so the next startup paints immediately.
+            state::save_row_cache(&rows);
             state.borrow_mut().rows = rows;
             rebuild_rows(&app, tray, actions, state, loc);
 
