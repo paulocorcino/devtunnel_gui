@@ -1,0 +1,37 @@
+// Ephemeral confirmation ("URL copied"): fades in, lingers, then fades out.
+// Owners bind `message` and call `show()`.
+import { Theme } from "theme.slint";
+
+export component Toast inherits Rectangle {
+    in property <string> message;
+    out property <bool> shown: false;
+
+    public function show() {
+        root.shown = true;
+        hide-timer.running = true;
+    }
+
+    width: label.preferred-width + Theme.pad * 2;
+    height: Theme.toast-height;
+    border-radius: Theme.toast-height / 2;
+    background: Theme.text;
+    opacity: root.shown ? 0.95 : 0;
+    animate opacity { duration: 180ms; }
+
+    label := Text {
+        x: Theme.pad;
+        y: (parent.height - self.preferred-height) / 2;
+        text: root.message;
+        color: Theme.bg;
+        font-size: Theme.fs-body;
+    }
+
+    hide-timer := Timer {
+        interval: Theme.toast-duration;
+        running: false;
+        triggered => {
+            self.running = false;
+            root.shown = false;
+        }
+    }
+}
