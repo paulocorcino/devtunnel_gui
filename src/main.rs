@@ -827,6 +827,18 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_ph_expiration(loc.t("ph-expiration").into());
     s.set_ph_description(loc.t("ph-description").into());
 
+    // Port detail panel
+    s.set_tab_metrics(loc.t("tab-metrics").into());
+    s.set_tab_logs(loc.t("tab-logs").into());
+    s.set_metric_upload(loc.t("metric-upload").into());
+    s.set_metric_download(loc.t("metric-download").into());
+    s.set_metric_total(loc.t("metric-total").into());
+    s.set_metric_rate(loc.t("metric-rate").into());
+    s.set_metric_connections(loc.t("metric-connections").into());
+    s.set_metric_active(loc.t("metric-active").into());
+    s.set_metric_na(loc.t("metric-na").into());
+    s.set_logs_empty(loc.t("logs-empty").into());
+
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());
     s.set_field_group(loc.t("field-group").into());

@@ -75,6 +75,19 @@ badge-service-down = Service down
 badge-down = Down
 badge-provisioning = Provisioning…
 
+## Port detail panel
+tab-metrics = Metrics
+tab-logs = Logs
+metric-upload = Upload
+metric-download = Download
+metric-total = Total
+metric-rate = Rate
+metric-connections = Connections
+metric-active = Active
+metric-na = n/a
+metric-rate-per-second = { $value }/s
+logs-empty = No log entries yet.
+
 ## Tray menu
 menu-open-window = Open window
 menu-copy-url = Copy URL
