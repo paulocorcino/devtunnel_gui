@@ -15,8 +15,10 @@
 
 use std::sync::mpsc::Sender;
 
-// The `engine` submodule (`#[cfg(feature = "hosting")] mod engine;`) is added in
-// Stage 2 together with its `engine.rs` file; Stage 1 keeps all logic inline.
+// The real SDK-backed engine (connect/keep-alive/stop) lives in `engine.rs` and
+// is compiled only with `--features hosting`.
+#[cfg(feature = "hosting")]
+mod engine;
 
 /// Lifecycle state of a hosted group, reported back to the UI via [`HostEvent`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,16 +68,29 @@ impl TunnelHost for NoopHost {
     fn send(&self, _cmd: HostCommand) {}
 }
 
+/// A host backed by the SDK engine thread. `send` forwards each command to the
+/// engine's command channel; a closed channel (engine gone) drops the command.
+#[cfg(feature = "hosting")]
+struct EngineHost {
+    cmd_tx: Sender<HostCommand>,
+}
+
+#[cfg(feature = "hosting")]
+impl TunnelHost for EngineHost {
+    fn send(&self, cmd: HostCommand) {
+        let _ = self.cmd_tx.send(cmd);
+    }
+}
+
 /// Spawns the host engine and returns its control handle.
 ///
-/// With `--features hosting` this returns a placeholder host (the real engine is
-/// wired in Stage 2). Without the feature it returns a [`NoopHost`].
+/// With `--features hosting` this starts the SDK-backed engine thread and returns
+/// a handle that forwards commands to it. Without the feature it returns a
+/// [`NoopHost`].
 #[cfg(feature = "hosting")]
-pub fn spawn(_events: Sender<HostEvent>) -> Box<dyn TunnelHost> {
-    // Placeholder until Stage 2 wires `engine::start(events)`. Keeping a no-op
-    // here lets the `hosting` build compile and link end-to-end in Stage 1.
-    let _ = &_events;
-    Box::new(NoopHost)
+pub fn spawn(events: Sender<HostEvent>) -> Box<dyn TunnelHost> {
+    let cmd_tx = engine::start(events);
+    Box::new(EngineHost { cmd_tx })
 }
 
 /// Spawns the host engine and returns its control handle (non-hosting build:
