@@ -1,7 +1,10 @@
 # Rust + CLI para management, SDK nativo para hospedagem
 
 ## Status
-accepted
+accepted — **confirmado** pelo spike #2 (2026-06-05): o SDK hospeda em processo
+end-to-end (ver [docs/spikes/0001-sdk-hosting.md](../spikes/0001-sdk-hosting.md)).
+A hospedagem fica atrás de um trait `TunnelHost`, deixando `devtunnel host` como
+fallback barato caso a manutenção (token refresh / build OpenSSL) incomode.
 
 ## Decisão
 
