@@ -3,7 +3,8 @@ import { Theme } from "theme.slint";
 
 // Uma linha = uma porta de um grupo (túnel), com sua Public URL.
 export struct PortRow {
-    group: string,
+    group: string,     // nome amigável do grupo (cai para o tunnel-id)
+    tunnel-id: string, // Real Tunnel ID (chave estável do serviço)
     port: int,
     protocol: string,
     url: string,
@@ -160,7 +161,9 @@ export component AppWindow inherits Window {
                             }
                         }
                         Text {
-                            text: "\{row.group} · expira: \{row.expiration}";
+                            text: row.group == row.tunnel-id
+                                ? "\{row.tunnel-id} · expira: \{row.expiration}"
+                                : "\{row.group} (\{row.tunnel-id}) · expira: \{row.expiration}";
                             color: Theme.muted;
                             font-size: Theme.fs-caption;
                         }
