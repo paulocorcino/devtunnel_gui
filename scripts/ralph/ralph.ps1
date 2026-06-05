@@ -60,7 +60,12 @@ param(
     [switch]$NoPublish,
 
     # Disable scheduling a re-run when a rate/usage limit is hit.
-    [switch]$NoResume
+    [switch]$NoResume,
+
+    # Execute via headless `claude -p` loop instead of an interactive session.
+    # Default is INTERACTIVE (cheaper on a subscription — headless -p is metered
+    # at a premium). Use -HeadlessExec only where no console/TTY is available.
+    [switch]$HeadlessExec
 )
 
 $ErrorActionPreference = 'Stop'
@@ -76,28 +81,38 @@ $null = (Get-Command gh -ErrorAction Stop)
 
 $RunStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $RunDir   = Join-Path $ScriptDir "runs\$RunStamp"
-$WtRoot   = Join-Path $ScriptDir 'worktrees'
+# Worktrees live OUTSIDE the repo (a sibling dir): their files must not contain
+# "/scripts/ralph/" in their path, or guard.ps1's tooling-protection rule would
+# block the agent from editing the issue's own source.
+$WtRoot   = Join-Path (Split-Path $RepoRoot -Parent) '.ralph-worktrees'
 $StateDir = Join-Path $ScriptDir 'state'        # survives across runs (plan cache)
 New-Item -ItemType Directory -Force -Path $RunDir, $WtRoot, $StateDir | Out-Null
 
 $Deadline = (Get-Date).AddHours($DeadlineHours)
 $LogFile  = Join-Path $RunDir 'ralph.log'
 $script:HaltForResume = $false
+$script:LimitText = ''
 
 function Log([string]$msg) {
     $line = "[{0:HH:mm:ss}] {1}" -f (Get-Date), $msg
     $line | Tee-Object -FilePath $LogFile -Append | Write-Host
 }
 
-# --- Hooks settings (guard deny-list), scoped to the runner -------------------
+# --- Hooks settings, scoped to the runner -------------------------------------
+# PreToolUse guard = destructive-command deny-list (both exec modes).
+# Stop hook = records RALPH_DONE_EXIT/BLOCKED to the flag file so the runner can
+# reclaim an INTERACTIVE session (interactive Claude never exits on its own).
 $GuardCmd = "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $ScriptDir 'guard.ps1')`""
+$StopCmd  = "pwsh -NoProfile -ExecutionPolicy Bypass -File `"$(Join-Path $ScriptDir 'stop_exit_hook.ps1')`""
 $Settings = @{
     skipDangerousModePermissionPrompt = $true   # don't hang on the accept prompt
     skipAutoPermissionPrompt          = $true
-    autoCompactEnabled                = $false   # don't interrupt a long -p session
+    autoCompactEnabled                = $false   # don't interrupt a long session
     hooks = @{
         PreToolUse = @(@{ matcher = 'Bash|Edit|Write|MultiEdit|NotebookEdit'
                           hooks   = @(@{ type = 'command'; command = $GuardCmd }) })
+        Stop       = @(@{ matcher = ''
+                          hooks   = @(@{ type = 'command'; command = $StopCmd }) })
     }
 }
 $SettingsPath = Join-Path $RunDir 'ralph.settings.json'
@@ -176,6 +191,50 @@ function Invoke-ExecLoop {
         if ($stuck -ge 2) { return 'stuck' }
     }
     return 'maxcalls'
+}
+
+# INTERACTIVE execution: launch a real Claude session in a new console window
+# (so it gets a TTY), poll the flag file the Stop hook writes, then reclaim it.
+# This is the default — interactive draws on the subscription quota, whereas
+# headless `-p` is metered at a premium.
+function Invoke-Interactive {
+    param([string]$Cwd, [string]$InitialPrompt, [string]$FlagFile)
+    Remove-Item -LiteralPath $FlagFile -ErrorAction SilentlyContinue
+    $env:RALPH_FLAG_FILE = $FlagFile           # inherited by claude -> the Stop hook
+
+    # Build a SINGLE pre-quoted command line. Passing -ArgumentList as an array
+    # makes Start-Process drop/split a multi-word positional prompt (only the
+    # first word survives); a single string with the prompt double-quoted is
+    # delivered intact.
+    $promptArg = $InitialPrompt -replace '"', '\"'
+    $argString = "--dangerously-skip-permissions --settings `"$SettingsPath`""
+    if ($ExecModel)  { $argString += " --model $ExecModel" }
+    if ($ExecEffort) { $argString += " --effort $ExecEffort" }
+    $argString += " `"$promptArg`""
+
+    # A console app launched without -NoNewWindow gets its own console window/TTY.
+    $proc = Start-Process -FilePath $Claude -ArgumentList $argString -WorkingDirectory $Cwd -PassThru
+    $issueDeadline = (Get-Date).AddMinutes($MaxMinutesPerIssue)
+
+    $status = 'unknown'
+    while ($true) {
+        Start-Sleep -Seconds 3
+        if (Test-Path $FlagFile)           { $status = (Get-Content $FlagFile -Raw).Trim(); try { $proc.Kill($true) } catch {}; break }
+        if ($proc.HasExited)               { $status = if (Test-Path $FlagFile) { (Get-Content $FlagFile -Raw).Trim() } else { 'exited' }; break }
+        if ((Get-Date) -ge $issueDeadline) { $status = 'timeout';  try { $proc.Kill($true) } catch {}; break }
+        if ((Get-Date) -ge $Deadline)      { $status = 'deadline'; try { $proc.Kill($true) } catch {}; break }
+    }
+    Remove-Item Env:\RALPH_FLAG_FILE -ErrorAction SilentlyContinue
+    return $status
+}
+
+function Get-LatestTranscript {
+    $base = Join-Path $env:USERPROFILE '.claude\projects'
+    if (-not (Test-Path $base)) { return $null }
+    $f = Get-ChildItem $base -Recurse -Filter *.jsonl -ErrorAction SilentlyContinue |
+         Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($f -and ((Get-Date) - $f.LastWriteTime).TotalSeconds -lt 300) { return $f }
+    return $null
 }
 
 # --- Rate-limit reset parsing + re-run scheduling -----------------------------
@@ -287,18 +346,34 @@ function Invoke-Issue {
         if ($DryRun) { Log "  [DryRun] plan saved to $(Join-Path $issueRun 'plan.md') (worktree kept at $wt)."; return }
 
         # --- Execution ---
-        $promptFile = Join-Path $issueRun 'exec-prompt.in'
-        Get-Content (Join-Path $ScriptDir 'prompt.execute.md') -Raw | Set-Content $promptFile -Encoding utf8
-        Log "  executing (model=$ExecModel effort=$ExecEffort)…"
-        $status = Invoke-ExecLoop -Cwd $wt -PlanPath $planPath -IssueRun $issueRun -PromptFile $promptFile
+        $script:LimitText = ''
+        if ($HeadlessExec) {
+            $promptFile = Join-Path $issueRun 'exec-prompt.in'
+            Get-Content (Join-Path $ScriptDir 'prompt.execute.md') -Raw | Set-Content $promptFile -Encoding utf8
+            Log "  executing [headless -p] (model=$ExecModel effort=$ExecEffort)…"
+            $status = Invoke-ExecLoop -Cwd $wt -PlanPath $planPath -IssueRun $issueRun -PromptFile $promptFile
+        } else {
+            Log "  executing [interactive] (model=$ExecModel effort=$ExecEffort)…"
+            $flag = Join-Path $issueRun 'status.flag'
+            $status = Invoke-Interactive -Cwd $wt -FlagFile $flag `
+                -InitialPrompt 'Read .ralph/exec.md and follow it exactly to implement .ralph/plan.md for this issue. Emit RALPH_DONE_EXIT when finished.'
+            # Interactive sessions exit on a usage limit; detect it from the transcript.
+            if ($status -in @('exited', 'timeout', 'deadline', 'unknown')) {
+                $tr = Get-LatestTranscript
+                if ($tr) { $txt = Get-Content $tr.FullName -Raw; if (Test-LimitText $txt) { $status = 'limit'; $script:LimitText = $txt } }
+            }
+        }
         Log "  execution ended: $status"
 
         # Refresh the cached plan with the agent's checkbox progress.
         if (Test-Path $planPath) { Copy-Item $planPath $planCache -Force }
 
         if ($status -eq 'limit') {
-            $lastErr = Get-ChildItem $issueRun -Filter 'exec-*.err' | Sort-Object Name | Select-Object -Last 1
-            $reset = if ($lastErr) { Get-ResetDateTime (Get-Content $lastErr.FullName -Raw) } else { $null }
+            $reset = if ($script:LimitText) { Get-ResetDateTime $script:LimitText } else { $null }
+            if (-not $reset) {
+                $lastErr = Get-ChildItem $issueRun -Filter 'exec-*.err' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
+                if ($lastErr) { $reset = Get-ResetDateTime (Get-Content $lastErr.FullName -Raw) }
+            }
             if (-not $reset) { $reset = (Get-Date).AddMinutes(60) }   # fallback: try again in an hour
             Schedule-Rerun $reset
             $script:HaltForResume = $true
@@ -315,7 +390,7 @@ function Invoke-Issue {
 }
 
 # --- Main ---------------------------------------------------------------------
-Log "Ralph run $RunStamp | deadline=$($Deadline.ToString('HH:mm')) perIssue=${MaxMinutesPerIssue}min exec=$ExecModel/$ExecEffort$(if($NoPublish){' [NoPublish]'})$(if($DryRun){' [DryRun]'})"
+Log "Ralph run $RunStamp | deadline=$($Deadline.ToString('HH:mm')) perIssue=${MaxMinutesPerIssue}min exec=$ExecModel/$ExecEffort$(if($HeadlessExec){' [headless]'}else{' [interactive]'})$(if($NoPublish){' [NoPublish]'})$(if($DryRun){' [DryRun]'})"
 git fetch origin --quiet
 
 $issues = (gh issue list --label AFK --state open --json number,title --limit 100) | ConvertFrom-Json

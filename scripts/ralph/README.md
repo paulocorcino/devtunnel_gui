@@ -41,23 +41,30 @@ ralph.ps1
 | `guard.ps1` | `PreToolUse` hook — destructive-command deny-list. |
 | `stop_exit_hook.ps1` | `Stop` hook — writes the exit signal to the flag file. |
 | `runs/<stamp>/` | Per-run logs + generated `ralph.settings.json`. (gitignored) |
-| `worktrees/` | Transient per-issue worktrees. (gitignored) |
+| `../.ralph-worktrees/` | Transient per-issue worktrees, kept **outside the repo** so their paths don't contain `/scripts/ralph/` (which `guard.ps1` blocks). |
 
 The hooks are injected only into the runner's `claude` calls via `--settings`,
 so your normal interactive Claude use is untouched.
 
+Execution is **interactive by default** (draws on the subscription quota).
+`-HeadlessExec` switches to a `claude -p` loop instead — simpler/headless but
+metered at a premium, so use it only where no console/TTY is available.
+
 ## How the interactive session self-terminates
 
-This is the crux. The runner launches `claude` (interactive, shared console)
-with `--settings` pointing at a Stop hook and an env var `RALPH_FLAG_FILE`:
+This is the crux. For each issue the runner launches `claude` in a **new console
+window** (so it gets a TTY) with `--settings` pointing at a Stop hook and an env
+var `RALPH_FLAG_FILE`. The initial prompt is passed as a single pre-quoted
+argument string (an `-ArgumentList` array drops a multi-word prompt — only the
+first word survives):
 
 1. The agent works the plan, then prints `RALPH_DONE_EXIT` (or
    `RALPH_BLOCKED_EXIT <reason>`).
-2. On its next turn-end, the **Stop hook** sees the token (from the payload or
-   the transcript) and writes `DONE`/`BLOCKED …` to `RALPH_FLAG_FILE`. It does
-   **not** kill anything.
+2. On its next turn-end, the **Stop hook** (`stop_exit_hook.ps1`) sees the token
+   (from the payload or the transcript) and writes `DONE`/`BLOCKED …` to
+   `RALPH_FLAG_FILE`. It does **not** kill anything.
 3. The orchestrator polls that file (every 3s). When it appears, it kills the
-   process tree (`taskkill /T /F`) and moves on. A `-MaxMinutesPerIssue`
+   process tree (`$proc.Kill($true)`) and moves on. A `-MaxMinutesPerIssue`
    timeout and the global `-DeadlineHours` are the anti-hang backstops.
 
 ## Safeguards (unattended)
@@ -94,38 +101,49 @@ pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13 -DryRun
 # 2) One issue, full plan + interactive execution + PR. Watch it.
 pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13
 
-# 3) The overnight run across the whole AFK queue.
+# 3) One issue, full plan + interactive execution, commit locally but NO PR.
+pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13 -NoPublish
+
+# 4) The overnight run across the whole AFK queue.
 pwsh -File scripts/ralph/ralph.ps1 -DeadlineHours 8
 
-# Faster/cheaper or stronger execution model:
+# Stronger/cheaper execution model, or headless -p (premium-metered) execution:
 pwsh -File scripts/ralph/ralph.ps1 -ExecModel sonnet -ExecEffort low
+pwsh -File scripts/ralph/ralph.ps1 -HeadlessExec
 ```
 
 Morning review: `gh pr list`; each issue has a comment with the outcome
 (`DONE` / `BLOCKED …` / `timeout` / `deadline`). Partial work lands as `[WIP]`
 PRs. Discard a dead branch with `git push origin --delete afk/<n>-…`.
 
-## What's verified vs what to validate
+## What's verified
 
-Confirmed empirically:
-- **Hooks load from `--settings`** — both `PreToolUse` (guard) and `Stop`
-  (exit-signal) fire when injected via `--settings`, so the global
-  `~/.claude/settings.json` is never touched.
-- **`claude -p` reads the prompt from STDIN** — a positional prompt is ignored
-  when stdout is non-interactive, so the planning pass pipes it via stdin.
+Validated end to end on a live issue (#10):
+- **Hooks load from `--settings`** — `PreToolUse` (guard) and `Stop`
+  (exit-signal) both fire, so the global `~/.claude/settings.json` is untouched.
+- **Plan via `claude -p`** (prompt piped on stdin) produces a real, codebase-
+  aware `.ralph/plan.md`.
+- **Interactive execution** launches in a new console, implements the whole
+  plan, commits, prints `RALPH_DONE_EXIT`; the Stop hook flags it and the runner
+  reclaims the process. The produced commit compiled clean (`cargo check`).
 - Pure logic (reset-time parser, slug, settings generation) is unit-verified.
 
-Still to validate with a live session (cannot be exercised here): the
-**interactive execution launch** (does the positional initial prompt reach an
-interactive, real-console session — it does under the WSL runner's Popen),
-the **Stop-hook → flag → reclaim** loop end to end, and the **rate-limit
-resume**. Validate incrementally:
+Bugs found and fixed during validation (kept here as guardrail rationale):
+- `claude -p` ignores a positional prompt when stdout is non-interactive →
+  planning pipes the prompt via **stdin**.
+- `Start-Process -ArgumentList` (array) drops a multi-word prompt → the
+  interactive launch passes a **single pre-quoted argument string**.
+- Worktrees under `scripts/ralph/` were blocked wholesale by `guard.ps1` →
+  worktrees now live **outside the repo** (`../.ralph-worktrees/`).
+
+Still to validate with a live session: the **rate-limit resume** path (needs an
+actual usage-limit to trigger). Validate new setups incrementally:
 
 1. `-OnlyIssue N -DryRun` — confirms plan generation and `.ralph/plan.md` shape.
-2. `-OnlyIssue N` on a tiny issue while you watch — confirms the session
-   launches, commits, prints `RALPH_DONE_EXIT`, and the runner reclaims it and
-   opens a PR. **This is the critical smoke test.**
-3. Only after (2) passes cleanly, trust the unattended queue.
+2. `-OnlyIssue N -NoPublish` — full interactive execution, commit locally, no
+   PR. Inspect the commit (`git -C ../.ralph-worktrees/issue-N log`).
+3. `-OnlyIssue N` — same, but pushes a branch and opens a PR.
+4. Only then trust the unattended queue.
 
 Known simplifications: the limit scheduler handles intraday resets
 (`resets 3:45pm`); a weekday-future reset (`resets Mon 9:30am`) is treated as the
