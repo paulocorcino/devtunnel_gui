@@ -16,7 +16,7 @@ slint::include_modules!();
 use fluent_bundle::FluentArgs;
 use locale::Locale;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -210,6 +210,10 @@ fn main() -> anyhow::Result<()> {
     let (probe_evt_rx, probe_cmd_tx) = {
         let (probe_evt_tx, probe_evt_rx) = std::sync::mpsc::channel::<probe::ProbeEvent>();
         let probe_cmd_tx = probe::spawn(probe_evt_tx);
+        // Apply the persisted steady-state cadence (conservative 60 s default;
+        // clamped to >= 1 s so a hand-edited 0 cannot busy-loop the probe).
+        let secs = app_state.borrow().settings.probe_interval_secs.max(1);
+        let _ = probe_cmd_tx.send(probe::ProbeCommand::SetInterval(Duration::from_secs(secs)));
         (probe_evt_rx, probe_cmd_tx)
     };
 
@@ -258,6 +262,31 @@ fn main() -> anyhow::Result<()> {
 
     // Pending deletion (set when a delete is requested, consumed on confirm).
     let pending: Rc<RefCell<Option<PendingDelete>>> = Rc::new(RefCell::new(None));
+
+    // True while the CLI sign-in is expired (re-login banner + alert tray icon).
+    let relogin: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+    // One-shot flag: re-host the persisted auto-host groups after the next
+    // successful load (set at startup and again after a successful re-login).
+    let auto_resume_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+    // Results from the background `devtunnel user login` thread.
+    let (login_tx, login_rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
+
+    // ---- Sign in (re-login flow): run `devtunnel user login` off the UI thread ----
+    {
+        let weak = app.as_weak();
+        let loc = loc.clone();
+        app.on_sign_in(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_status(loc.t("status-signing-in").into());
+            }
+            let login_tx = login_tx.clone();
+            let lang = locale::system_locale();
+            std::thread::spawn(move || {
+                let loc = Locale::load(&lang);
+                let _ = login_tx.send(devtunnel::user_login(&loc));
+            });
+        });
+    }
 
     // ---- Create group ----
     {
@@ -506,6 +535,11 @@ fn main() -> anyhow::Result<()> {
         let actions = actions.clone();
         let loc = loc.clone();
         let state = state.clone();
+        let app_state = app_state.clone();
+        let tunnel_host = tunnel_host.clone();
+        let relogin = relogin.clone();
+        let auto_resume_pending = auto_resume_pending.clone();
+        let tx = tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -530,41 +564,110 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
+                let mut load_ok = false;
                 while let Ok((placeholder_id, result)) = rx.try_recv() {
-                    apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
+                    if apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc) {
+                        load_ok = true;
+                    }
                     loaded = true;
                 }
 
                 // Host engine state changes -> update per-group host state.
                 let mut host_changed = false;
-                while let Ok(host::HostEvent::State {
-                    tunnel_id,
-                    state: hs,
-                }) = host_evt_rx.try_recv()
-                {
-                    log::debug!("host event: {tunnel_id} -> {hs:?}");
-                    // Surface connection failures in the status bar (otherwise a failed
-                    // Host is silent and looks like "nothing happened").
-                    if let host::HostState::Error(msg) = &hs {
-                        if let Some(a) = weak.upgrade() {
-                            let mut args = FluentArgs::new();
-                            args.set("message", msg.clone());
-                            a.set_status(loc.t_args("status-error", &args).into());
+                while let Ok(ev) = host_evt_rx.try_recv() {
+                    match ev {
+                        host::HostEvent::State {
+                            tunnel_id,
+                            state: hs,
+                        } => {
+                            log::debug!("host event: {tunnel_id} -> {hs:?}");
+                            // Surface connection failures in the status bar (otherwise a failed
+                            // Host is silent and looks like "nothing happened").
+                            if let host::HostState::Error(msg) = &hs {
+                                if let Some(a) = weak.upgrade() {
+                                    let mut args = FluentArgs::new();
+                                    args.set("message", msg.clone());
+                                    a.set_status(loc.t_args("status-error", &args).into());
+                                }
+                            }
+                            let id = map_host_state(&hs);
+                            let mut st = state.borrow_mut();
+                            match id {
+                                Some(v) => {
+                                    st.host.insert(tunnel_id, v.to_string());
+                                }
+                                None => {
+                                    // Stopped / Idle / Error: clear host + probe for the group.
+                                    st.host.remove(&tunnel_id);
+                                    st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                                }
+                            }
+                            host_changed = true;
+                        }
+                        host::HostEvent::ReloginRequired { tunnel_id } => {
+                            log::warn!("host: re-login required (reported for {tunnel_id})");
+                            // Enter the re-login state once: banner + alert tray
+                            // icon + a single Windows toast.
+                            if !relogin.get() {
+                                relogin.set(true);
+                                if let Some(a) = weak.upgrade() {
+                                    a.set_relogin_required(true);
+                                    a.set_status(loc.t("relogin-message").into());
+                                }
+                                let _ = tray.set_icon(Some(build_alert_icon()));
+                                #[cfg(windows)]
+                                show_relogin_toast(&loc);
+                            }
                         }
                     }
-                    let id = map_host_state(&hs);
-                    let mut st = state.borrow_mut();
-                    match id {
-                        Some(v) => {
-                            st.host.insert(tunnel_id, v.to_string());
+                }
+
+                // Sign-in results from the background `devtunnel user login`.
+                while let Ok(result) = login_rx.try_recv() {
+                    match result {
+                        Ok(()) => {
+                            // Clear the re-login state and re-resolve + re-host the
+                            // auto-host groups via a fresh load.
+                            relogin.set(false);
+                            if let Some(a) = weak.upgrade() {
+                                a.set_relogin_required(false);
+                            }
+                            let _ = tray.set_icon(Some(build_icon()));
+                            auto_resume_pending.set(true);
+                            load_async(&weak, &tx, &loc);
                         }
-                        None => {
-                            // Stopped / Idle / Error: clear host + probe for the group.
-                            st.host.remove(&tunnel_id);
-                            st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                        Err(e) => {
+                            if let Some(a) = weak.upgrade() {
+                                let mut args = FluentArgs::new();
+                                args.set("message", e.to_string());
+                                a.set_status(loc.t_args("status-error", &args).into());
+                            }
                         }
                     }
-                    host_changed = true;
+                }
+
+                // One-shot auto-resume (hosting build): after a successful load,
+                // re-host every persisted auto-host group that resolves to a known
+                // Real Tunnel ID with at least one port; log the skipped ones.
+                if cfg!(feature = "hosting") && load_ok && auto_resume_pending.get() {
+                    auto_resume_pending.set(false);
+                    let ids = app_state.borrow().auto_host.clone();
+                    if !ids.is_empty() {
+                        let mut st = state.borrow_mut();
+                        for id in &ids {
+                            let known = st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
+                            if known {
+                                log::info!("auto-resume: hosting {id}");
+                                tunnel_host.send(host::HostCommand::Host {
+                                    tunnel_id: id.clone(),
+                                });
+                                st.host.insert(id.clone(), "host".to_string());
+                                host_changed = true;
+                            } else {
+                                log::info!("auto-resume: skipping unknown or portless group {id}");
+                            }
+                        }
+                    }
                 }
 
                 // Probe results -> update per-port health status.
@@ -705,7 +808,8 @@ fn run_op_async<F>(
 }
 
 /// Applies a load result: fills the list and rebuilds the tray menu.
-/// Always runs on the UI thread (called by the timer).
+/// Always runs on the UI thread (called by the timer). Returns `true` when the
+/// load succeeded (used to trigger the one-shot auto-resume).
 fn apply_rows(
     weak: &slint::Weak<AppWindow>,
     tray: &tray_icon::TrayIcon,
@@ -714,8 +818,10 @@ fn apply_rows(
     placeholder_id: Option<u64>,
     result: anyhow::Result<Vec<devtunnel::Row>>,
     loc: &Rc<Locale>,
-) {
-    let Some(app) = weak.upgrade() else { return };
+) -> bool {
+    let Some(app) = weak.upgrade() else {
+        return false;
+    };
 
     // Remove the optimistic placeholder whether the op succeeded or failed.
     if let Some(id) = placeholder_id {
@@ -752,6 +858,7 @@ fn apply_rows(
             let mut args = FluentArgs::new();
             args.set("count", count as i64);
             app.set_status(loc.t_args("status-port-count", &args).into());
+            true
         }
         Err(e) => {
             // Rebuild so that the removed placeholder is no longer shown.
@@ -759,6 +866,7 @@ fn apply_rows(
             let mut args = FluentArgs::new();
             args.set("message", e.to_string());
             app.set_status(loc.t_args("status-error", &args).into());
+            false
         }
     }
 }
@@ -976,4 +1084,25 @@ fn build_icon() -> Icon {
     }
     // String literal kept here intentionally: build_icon() runs before Locale is loaded.
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Solid orange 32×32 alert icon, swapped in while a re-login is required.
+fn build_alert_icon() -> Icon {
+    const SIZE: u32 = 32;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for _ in 0..(SIZE * SIZE) {
+        rgba.extend_from_slice(&[0xff, 0x8c, 0x00, 0xff]); // dark orange
+    }
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Fires the one-shot Windows toast for the re-login case (no toasts for any
+/// other status change). Best-effort: a toast failure is not worth surfacing.
+#[cfg(windows)]
+fn show_relogin_toast(loc: &Locale) {
+    use tauri_winrt_notification::Toast;
+    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
+        .title(&loc.t("toast-relogin-title"))
+        .text1(&loc.t("toast-relogin-body"))
+        .show();
 }

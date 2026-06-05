@@ -32,6 +32,8 @@ ureq = { version = "2", default-features = false, features = ["tls"], optional =
 [target.'cfg(windows)'.dependencies]
 # HKCU Run-key auto-start toggle (issue #5).
 winreg = "0.52"
+# Windows toast for the re-login case only (issue #5).
+tauri-winrt-notification = "0.7"
 
 [features]
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
