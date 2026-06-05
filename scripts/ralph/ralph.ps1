@@ -41,14 +41,19 @@ param(
     # Safety-net cap on `claude -p` execution calls per issue.
     [int]$MaxExecCalls = 6,
 
-    # Model alias for the planning `-p` call ('' = configured default).
+    # Planning model + effort. Planning runs on the stronger model: it reads the
+    # codebase and ALSO judges complexity to pick the execution model.
     [string]$PlanModel = 'opus',
+    [string]$PlanEffort = 'medium',
 
-    # Model alias for the execution `-p` calls (cheaper = stretches quota).
-    [string]$ExecModel = 'sonnet',
+    # Execution model. Empty = chosen per issue from the plan's complexity
+    # judgment (sonnet for mechanical/localized work, opus for complex). Set a
+    # value to force it for every issue (overrides the judgment).
+    [string]$ExecModel = '',
+    [string]$ExecEffort = 'medium',
 
-    # Reasoning effort for execution ('' to omit the flag).
-    [string]$ExecEffort = 'low',
+    # Fallback execution model when the plan emits no judgment.
+    [string]$DefaultExecModel = 'sonnet',
 
     # Work only this issue number.
     [int]$OnlyIssue = 0,
@@ -65,7 +70,11 @@ param(
     # Execute via headless `claude -p` loop instead of an interactive session.
     # Default is INTERACTIVE (cheaper on a subscription — headless -p is metered
     # at a premium). Use -HeadlessExec only where no console/TTY is available.
-    [switch]$HeadlessExec
+    [switch]$HeadlessExec,
+
+    # Interactive sessions enable Remote Control by default, so you can follow
+    # and intervene from the Claude mobile app. -NoRemoteControl disables it.
+    [switch]$NoRemoteControl
 )
 
 $ErrorActionPreference = 'Stop'
@@ -133,6 +142,14 @@ function Get-OpenSteps([string]$PlanPath) {
     return (Select-String -Path $PlanPath -Pattern '^\s*-\s*\[ \]' -AllMatches).Count
 }
 
+# Read the planner's complexity judgment: "## Execution model: sonnet|opus".
+function Get-RecommendedModel([string]$PlanPath) {
+    if (-not (Test-Path $PlanPath)) { return '' }
+    $m = Select-String -Path $PlanPath -Pattern '^\s*##\s*Execution model:\s*(opus|sonnet)' | Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value.ToLower() }
+    return ''
+}
+
 function Test-LimitText([string]$text) {
     return [bool]($text -match '(?i)(rate limit|usage limit|reached your .* limit|limit reached|resets\s+\d)')
 }
@@ -140,20 +157,25 @@ function Test-LimitText([string]$text) {
 # PLAN: one-shot `claude -p`, prompt piped via STDIN (a positional prompt is
 # ignored when stdout is non-interactive). Writes .ralph/plan.md inside $Cwd.
 function Invoke-Plan {
-    param([string]$Cwd, [string]$PromptText, [string]$OutLog)
+    param([string]$Cwd, [string]$PromptText, [string]$OutLog, [switch]$Staged)
     $a = @('-p', '--dangerously-skip-permissions', '--settings', $SettingsPath)
-    if ($PlanModel) { $a = @('--model', $PlanModel) + $a }
+    if ($PlanEffort) { $a += @('--effort', $PlanEffort) }
+    if ($PlanModel)  { $a = @('--model', $PlanModel) + $a }
+    if ($Staged) { $env:STAGED_PLAN_NONINTERACTIVE = '1' }  # staged-plan skill: no AskUserQuestion
     Push-Location $Cwd
     try { ($PromptText | & $Claude @a 2>&1) | Set-Content -Path $OutLog -Encoding utf8 }
-    finally { Pop-Location }
+    finally {
+        Pop-Location
+        if ($Staged) { Remove-Item Env:\STAGED_PLAN_NONINTERACTIVE -ErrorAction SilentlyContinue }
+    }
 }
 
 # One execution call: `claude -p` with the prompt on stdin, captured output,
 # and a hard timeout. Returns $true if it exited within the timeout.
 function Invoke-ExecCall {
-    param([string]$Cwd, [string]$PromptFile, [string]$OutFile, [string]$ErrFile, [int]$TimeoutMs)
+    param([string]$Cwd, [string]$PromptFile, [string]$OutFile, [string]$ErrFile, [int]$TimeoutMs, [string]$Model)
     $a = @('-p', '--dangerously-skip-permissions', '--settings', $SettingsPath)
-    if ($ExecModel)  { $a += @('--model', $ExecModel) }
+    if ($Model)      { $a += @('--model', $Model) }
     if ($ExecEffort) { $a += @('--effort', $ExecEffort) }
     $p = Start-Process $Claude -ArgumentList $a -WorkingDirectory $Cwd -NoNewWindow -PassThru `
             -RedirectStandardInput $PromptFile -RedirectStandardOutput $OutFile -RedirectStandardError $ErrFile
@@ -163,7 +185,7 @@ function Invoke-ExecCall {
 
 # EXECUTE loop: run -p calls until DONE / BLOCKED / stuck / timeout / cap.
 function Invoke-ExecLoop {
-    param([string]$Cwd, [string]$PlanPath, [string]$IssueRun, [string]$PromptFile)
+    param([string]$Cwd, [string]$PlanPath, [string]$IssueRun, [string]$PromptFile, [string]$Model)
     $issueDeadline = (Get-Date).AddMinutes($MaxMinutesPerIssue)
     $stuck = 0
     for ($i = 1; $i -le $MaxExecCalls; $i++) {
@@ -172,7 +194,7 @@ function Invoke-ExecLoop {
 
         $before = (git -C $Cwd rev-parse HEAD).Trim()
         $of = Join-Path $IssueRun "exec-$i.out"; $ef = Join-Path $IssueRun "exec-$i.err"
-        $exited = Invoke-ExecCall -Cwd $Cwd -PromptFile $PromptFile -OutFile $of -ErrFile $ef -TimeoutMs $remMs
+        $exited = Invoke-ExecCall -Cwd $Cwd -PromptFile $PromptFile -OutFile $of -ErrFile $ef -TimeoutMs $remMs -Model $Model
         $after  = (git -C $Cwd rev-parse HEAD).Trim()
 
         $out = ((Get-Content $of -Raw -ErrorAction SilentlyContinue) + "`n" + (Get-Content $ef -Raw -ErrorAction SilentlyContinue))
@@ -198,7 +220,7 @@ function Invoke-ExecLoop {
 # This is the default — interactive draws on the subscription quota, whereas
 # headless `-p` is metered at a premium.
 function Invoke-Interactive {
-    param([string]$Cwd, [string]$InitialPrompt, [string]$FlagFile)
+    param([string]$Cwd, [string]$InitialPrompt, [string]$FlagFile, [string]$Model, [string]$Name)
     Remove-Item -LiteralPath $FlagFile -ErrorAction SilentlyContinue
     $env:RALPH_FLAG_FILE = $FlagFile           # inherited by claude -> the Stop hook
 
@@ -208,7 +230,8 @@ function Invoke-Interactive {
     # delivered intact.
     $promptArg = $InitialPrompt -replace '"', '\"'
     $argString = "--dangerously-skip-permissions --settings `"$SettingsPath`""
-    if ($ExecModel)  { $argString += " --model $ExecModel" }
+    if (-not $NoRemoteControl) { $argString += " --remote-control `"$Name`"" }  # follow from mobile
+    if ($Model)      { $argString += " --model $Model" }
     if ($ExecEffort) { $argString += " --effort $ExecEffort" }
     $argString += " `"$promptArg`""
 
@@ -272,31 +295,46 @@ function Publish-Result {
         if ([int]$commits -gt 0) { (git -C $Wt log --oneline "origin/main..HEAD") | ForEach-Object { Log "    $_" } }
         return
     }
-    if ([int]$commits -le 0) {
-        $why = if ($Status -like 'BLOCKED*') { $Status -replace '^BLOCKED', 'blocked:' } else { "no progress ($Status)" }
-        gh issue comment $IssueNum --body "Ralph: $why. No commits, no PR opened." | Out-Null
+
+    # Open a PR ONLY when the agent explicitly finished (DONE).
+    if ($Status -ne 'DONE') {
+        if ($Status -like 'BLOCKED*') {
+            # Explicit block: Claude decided it can't proceed autonomously. Hand
+            # it to a human with the HITL label (created on demand) — the queue
+            # skips HITL issues, so it is not retried until a human clears it.
+            $reason = ($Status -replace '^BLOCKED', '').Trim()
+            gh label create HITL --color B60205 --description "Needs a human (Ralph blocked)" 2>$null | Out-Null
+            gh issue edit $IssueNum --add-label HITL 2>&1 | Out-Null
+            gh issue comment $IssueNum --body "Ralph: blocked — $reason. Labelled **HITL**; will not retry until a human resolves it." | Out-Null
+            Log "  blocked -> labelled #$IssueNum HITL"
+        } else {
+            # Timeout / incomplete session: transient. Keep AFK and resume next run.
+            $note = if ([int]$commits -gt 0) { " $commits local commit(s) kept on '$Branch' for resume." } else { '' }
+            gh issue comment $IssueNum --body "Ralph: did not finish ($Status). No PR opened.$note Will resume on the next run." | Out-Null
+        }
         return
     }
-    git -C $Wt push -u origin $Branch --quiet
-    $done = $Status -eq 'DONE'
-    $tag  = if ($done) { "Closes #$IssueNum" } else { "Refs #$IssueNum (partial: $Status)" }
-    $ttl  = if ($done) { "$Title (#$IssueNum)" } else { "[WIP] $Title (#$IssueNum)" }
-    $body = @"
-Autonomous Ralph PR for issue #$IssueNum.
+    if ([int]$commits -le 0) {
+        gh issue comment $IssueNum --body "Ralph: reported DONE but produced no commits — nothing to open a PR with." | Out-Null
+        return
+    }
 
-Status: **$Status** ($commits commit(s)).
-$tag
+    git -C $Wt push -u origin $Branch --quiet
+    $body = @"
+Autonomous Ralph PR for issue #$IssueNum ($commits commit(s)).
+
+Closes #$IssueNum
 
 > Generated overnight on the subscription quota. Review before merging.
 "@
-    $pr = gh pr create --base main --head $Branch --title $ttl --body $body 2>&1
+    $pr = gh pr create --base main --head $Branch --title "$Title (#$IssueNum)" --body $body 2>&1
     Log "  PR: $pr"
-    gh issue comment $IssueNum --body "Ralph: opened $pr — status **$Status** ($commits commits)." | Out-Null
+    gh issue comment $IssueNum --body "Ralph: DONE — opened $pr ($commits commits)." | Out-Null
 }
 
 # --- Run one issue end to end -------------------------------------------------
 function Invoke-Issue {
-    param([int]$IssueNum, [string]$Title)
+    param([int]$IssueNum, [string]$Title, [switch]$StagedPlan)
 
     $issueRun = Join-Path $RunDir "issue-$IssueNum"
     New-Item -ItemType Directory -Force -Path $issueRun | Out-Null
@@ -332,8 +370,9 @@ function Invoke-Issue {
             Copy-Item $planCache $planPath -Force
             Log "  resuming with cached plan ($(Get-OpenSteps $planPath) open step(s))."
         } else {
-            Log "  planning…"
-            Invoke-Plan -Cwd $wt -PromptText (Get-Content (Join-Path $ScriptDir 'prompt.plan.md') -Raw) -OutLog (Join-Path $issueRun 'plan.log')
+            $planPrompt = if ($StagedPlan) { 'prompt.plan.staged.md' } else { 'prompt.plan.md' }
+            Log "  planning… [$(if($StagedPlan){'staged-plan skill'}else{'standard'})]"
+            Invoke-Plan -Cwd $wt -PromptText (Get-Content (Join-Path $ScriptDir $planPrompt) -Raw) -OutLog (Join-Path $issueRun 'plan.log') -Staged:$StagedPlan
             $open = Get-OpenSteps $planPath
             if ($open -lt 0) { Log "  no plan written — skipping."; if (-not $NoPublish) { gh issue comment $IssueNum --body "Ralph: planning produced no plan file. Skipped." | Out-Null }; return }
             if ($open -eq 0) { Log "  no actionable steps — infeasible."; if (-not $NoPublish) { gh issue comment $IssueNum --body "Ralph: planning found no actionable, autonomously-verifiable steps. Skipped." | Out-Null }; return }
@@ -345,17 +384,26 @@ function Invoke-Issue {
 
         if ($DryRun) { Log "  [DryRun] plan saved to $(Join-Path $issueRun 'plan.md') (worktree kept at $wt)."; return }
 
+        # --- Choose execution model: explicit override > plan judgment > default.
+        if ($ExecModel) {
+            $execModel = $ExecModel; $why = 'forced'
+        } else {
+            $execModel = Get-RecommendedModel $planPath
+            if ($execModel) { $why = 'plan judgment' } else { $execModel = $DefaultExecModel; $why = 'default (no judgment)' }
+        }
+        Log "  exec model: $execModel/$ExecEffort [$why]"
+
         # --- Execution ---
         $script:LimitText = ''
         if ($HeadlessExec) {
             $promptFile = Join-Path $issueRun 'exec-prompt.in'
             Get-Content (Join-Path $ScriptDir 'prompt.execute.md') -Raw | Set-Content $promptFile -Encoding utf8
-            Log "  executing [headless -p] (model=$ExecModel effort=$ExecEffort)…"
-            $status = Invoke-ExecLoop -Cwd $wt -PlanPath $planPath -IssueRun $issueRun -PromptFile $promptFile
+            Log "  executing [headless -p]…"
+            $status = Invoke-ExecLoop -Cwd $wt -PlanPath $planPath -IssueRun $issueRun -PromptFile $promptFile -Model $execModel
         } else {
-            Log "  executing [interactive] (model=$ExecModel effort=$ExecEffort)…"
+            Log "  executing [interactive$(if(-not $NoRemoteControl){' +remote'})]…"
             $flag = Join-Path $issueRun 'status.flag'
-            $status = Invoke-Interactive -Cwd $wt -FlagFile $flag `
+            $status = Invoke-Interactive -Cwd $wt -FlagFile $flag -Model $execModel -Name "ralph-$IssueNum" `
                 -InitialPrompt 'Read .ralph/exec.md and follow it exactly to implement .ralph/plan.md for this issue. Emit RALPH_DONE_EXIT when finished.'
             # Interactive sessions exit on a usage limit; detect it from the transcript.
             if ($status -in @('exited', 'timeout', 'deadline', 'unknown')) {
@@ -390,13 +438,17 @@ function Invoke-Issue {
 }
 
 # --- Main ---------------------------------------------------------------------
-Log "Ralph run $RunStamp | deadline=$($Deadline.ToString('HH:mm')) perIssue=${MaxMinutesPerIssue}min exec=$ExecModel/$ExecEffort$(if($HeadlessExec){' [headless]'}else{' [interactive]'})$(if($NoPublish){' [NoPublish]'})$(if($DryRun){' [DryRun]'})"
+Log "Ralph run $RunStamp | deadline=$($Deadline.ToString('HH:mm')) perIssue=${MaxMinutesPerIssue}min plan=$PlanModel/$PlanEffort exec=$(if($ExecModel){$ExecModel}else{'auto'})/$ExecEffort$(if($HeadlessExec){' [headless]'}else{' [interactive]'})$(if($NoPublish){' [NoPublish]'})$(if($DryRun){' [DryRun]'})"
 git fetch origin --quiet
 
-$issues = (gh issue list --label AFK --state open --json number,title --limit 100) | ConvertFrom-Json
+$issues = (gh issue list --label AFK --state open --json number,title,labels --limit 100) | ConvertFrom-Json
 if ($OnlyIssue -gt 0) { $issues = $issues | Where-Object { $_.number -eq $OnlyIssue } }
-if (-not $issues) { Log "No open AFK issues. Done."; return }
-Log "Queue: $($issues.Count) issue(s): $((($issues | ForEach-Object { '#' + $_.number }) -join ', '))"
+# Skip issues a previous run handed off to a human (labelled HITL).
+$issues = @($issues | Where-Object { $_.labels.name -notcontains 'HITL' })
+if (-not $issues) { Log "No open AFK issues to process. Done."; return }
+# Respect task sequence: process in ascending issue-number order (#5, #6, #9 ...).
+$issues = @($issues | Sort-Object number)
+Log "Queue: $($issues.Count) issue(s) in order: $((($issues | ForEach-Object { '#' + $_.number }) -join ' -> '))"
 
 # Skip issues that already have an OPEN PR (delivered/in-review); incomplete
 # branches without a PR are resumed.
@@ -407,7 +459,8 @@ foreach ($issue in $issues) {
     if ((Get-Date) -ge $Deadline) { Log "DEADLINE reached. Stopping."; break }
     if ($openPrHeads | Where-Object { $_ -like "afk/$($issue.number)-*" }) { Log "#$($issue.number) already has an open PR — skipping."; continue }
 
-    Invoke-Issue -IssueNum $issue.number -Title $issue.title
+    $staged = $issue.labels.name -contains 'stagedplan'
+    Invoke-Issue -IssueNum $issue.number -Title $issue.title -StagedPlan:$staged
     if ($script:HaltForResume) { Log "Stopping run; re-run is scheduled."; break }
 }
 

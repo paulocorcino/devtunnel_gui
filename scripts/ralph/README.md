@@ -7,27 +7,36 @@ never merges — you review in the morning.
 Best-of-both design, merging the [Ralph loop](https://ghuntley.com/ralph/) with a
 plan-then-interactive-execute flow:
 
-- **Plan** with `claude -p` (cheap, non-interactive) → writes `.ralph/plan.md`.
-- **Execute** in **one interactive Claude session per issue**. A single warm
-  session does every plan step (far fewer tokens than re-priming context per
-  step). The session ends *itself* by printing `RALPH_DONE_EXIT`; a **Stop
-  hook** records that to a flag file and the runner reclaims the process.
-- **GitHub-native**: queue from `gh issue list --label AFK`; deliver via a
-  branch + `gh pr create`.
-- **Subscription-friendly scheduling**: no USD cap (there's no API spend). The
-  real limiter is your plan's rate limit — on a limit the runner parses the
-  reset time from the transcript and schedules a **resume** via a detached
-  PowerShell process.
+- **Plan** with `claude -p` on the stronger model (**Opus, medium effort**): it
+  reads the codebase, judges complexity, and **picks the execution model**
+  (`sonnet` for mechanical/localized work, `opus` for genuinely complex). Issues
+  labelled `stagedplan` are planned via the **`staged-plan` skill**.
+- **Execute** in **one interactive Claude session per issue** on the chosen
+  model (medium effort), with **Remote Control** on so you can follow and
+  intervene from the Claude mobile app (each session is named `ralph-<n>`). The
+  session ends *itself* by printing `RALPH_DONE_EXIT`; a **Stop hook** flags it
+  and the runner reclaims the process.
+- **GitHub-native**: the `gh issue list --label AFK` queue is processed in
+  **ascending issue-number order**. A finished issue (`DONE`) gets a PR
+  (`Closes #n`); an explicitly **blocked** issue gets the `HITL` label and is
+  not retried; a timeout/incomplete one keeps `AFK` and resumes next run.
+- **Subscription-friendly**: no USD cap (there's no API spend). The real limiter
+  is your plan's rate limit — on a limit the runner parses the reset time and
+  schedules a **resume** via a detached PowerShell process.
 
 ```
 ralph.ps1
-  └─ for each open AFK issue (skip if a branch already exists):
-       git worktree add -b afk/<n>-<slug> off origin/main      (isolation)
-       PLAN     : claude -p  prompt.plan.md   → .ralph/plan.md  (checklist)
-       EXECUTE  : claude (interactive)  → does every step, commits each
-                  → prints RALPH_DONE_EXIT → Stop hook flags it → runner kills it
-       PUBLISH  : git push + gh pr create   ([WIP] if partial / blocked)
-       COMMENT  : gh issue comment   (outcome)
+  └─ for each open AFK issue, ascending #, skipping HITL + already-PR'd ones:
+       worktree add   (off origin/main, OUTSIDE the repo)
+       PLAN     : claude -p (Opus/medium)  → .ralph/plan.md
+                  · emits "## Execution model: sonnet|opus" (complexity judgment)
+                  · `stagedplan`-labelled issues plan via the staged-plan skill
+       EXECUTE  : claude (interactive, chosen model, +Remote Control "ralph-<n>")
+                  → does every step, commits each → prints RALPH_DONE_EXIT
+                  → Stop hook flags it → runner reclaims the process
+       OUTCOME  : DONE    → git push + gh pr create (Closes #n)
+                  BLOCKED → comment + label HITL (not retried)
+                  timeout → comment, keep AFK (resume next run)
        on rate/usage limit → schedule a resume after reset, stop the run
 ```
 
@@ -36,8 +45,9 @@ ralph.ps1
 | File | Role |
 |------|------|
 | `ralph.ps1` | Orchestrator: queue, worktrees, plan, interactive execute, limit-resume, PR. |
-| `prompt.plan.md` | Planning pass (`-p`) → `.ralph/plan.md`. |
-| `prompt.execute.md` | The interactive session's charter (copied to `.ralph/exec.md`). |
+| `prompt.plan.md` | Standard planning pass (`-p`) → `.ralph/plan.md`. |
+| `prompt.plan.staged.md` | Planning pass for `stagedplan`-labelled issues — uses the `staged-plan` skill. |
+| `prompt.execute.md` | The execution session's charter (copied to `.ralph/exec.md`). |
 | `guard.ps1` | `PreToolUse` hook — destructive-command deny-list. |
 | `stop_exit_hook.ps1` | `Stop` hook — writes the exit signal to the flag file. |
 | `runs/<stamp>/` | Per-run logs + generated `ralph.settings.json`. (gitignored) |
@@ -76,8 +86,13 @@ first word survives):
 - **Per-issue wall timeout** (`-MaxMinutesPerIssue`, default 45) + global
   **`-DeadlineHours`** (default 8).
 - **Worktree isolation**: your main working tree is never touched.
-- **PR-only**: the agent commits; the orchestrator pushes and opens the PR.
-- **Idempotency**: an issue whose `afk/<n>-*` branch already exists is skipped.
+- **PR only on `DONE`**: the agent commits; the orchestrator pushes and opens a
+  PR *only* when the agent explicitly finished. Non-DONE outcomes open no PR.
+- **Idempotency / queue hygiene**: issues are processed in ascending number
+  order; one with an open PR is skipped; one labelled `HITL` (explicitly blocked)
+  is skipped until a human clears it; a timeout keeps `AFK` and resumes.
+- **Model routing**: planning judges complexity and runs execution on the
+  smallest sufficient model (`sonnet` vs `opus`), saving quota.
 - **`cargo test` gate**: the execution charter requires green tests before each
   commit.
 
@@ -98,23 +113,27 @@ first word survives):
 # 1) Plan only, one issue. No execution, no PR. Inspect .ralph/plan.md.
 pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13 -DryRun
 
-# 2) One issue, full plan + interactive execution + PR. Watch it.
+# 2) One issue, full plan + interactive execution + PR. Follow it from the
+#    Claude mobile app (session "ralph-13").
 pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13
 
 # 3) One issue, full plan + interactive execution, commit locally but NO PR.
 pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13 -NoPublish
 
-# 4) The overnight run across the whole AFK queue.
+# 4) The overnight run across the whole AFK queue (ascending order).
 pwsh -File scripts/ralph/ralph.ps1 -DeadlineHours 8
 
-# Stronger/cheaper execution model, or headless -p (premium-metered) execution:
-pwsh -File scripts/ralph/ralph.ps1 -ExecModel sonnet -ExecEffort low
+# Force a model for every issue (overrides the plan's judgment); disable Remote
+# Control; or use headless -p (premium-metered) execution:
+pwsh -File scripts/ralph/ralph.ps1 -ExecModel opus
+pwsh -File scripts/ralph/ralph.ps1 -NoRemoteControl
 pwsh -File scripts/ralph/ralph.ps1 -HeadlessExec
 ```
 
-Morning review: `gh pr list`; each issue has a comment with the outcome
-(`DONE` / `BLOCKED …` / `timeout` / `deadline`). Partial work lands as `[WIP]`
-PRs. Discard a dead branch with `git push origin --delete afk/<n>-…`.
+Morning review: `gh pr list` for the `DONE` issues; issues labelled `HITL` need
+you (Claude blocked on them — read the comment); the rest keep `AFK` and will be
+retried next run. Reverse a HITL hand-off by removing the label. Discard a dead
+branch with `git push origin --delete afk/<n>-…`.
 
 ## What's verified
 
@@ -136,8 +155,13 @@ Bugs found and fixed during validation (kept here as guardrail rationale):
 - Worktrees under `scripts/ralph/` were blocked wholesale by `guard.ps1` →
   worktrees now live **outside the repo** (`../.ralph-worktrees/`).
 
-Still to validate with a live session: the **rate-limit resume** path (needs an
-actual usage-limit to trigger). Validate new setups incrementally:
+Wired but not yet live-validated (sanity-checked in isolation only): the
+**`staged-plan` skill** invoked headlessly for `stagedplan` issues (it may
+scaffold to `docs/plans/` — the prompt requires `.ralph/plan.md` to be the
+authoritative artifact), the **rate-limit resume** path (needs an actual
+usage-limit), and **HITL** labelling. The **model router** (plan emits
+`## Execution model:`, runner parses it) and **Remote Control** flag are
+verified mechanically. Validate new setups incrementally:
 
 1. `-OnlyIssue N -DryRun` — confirms plan generation and `.ralph/plan.md` shape.
 2. `-OnlyIssue N -NoPublish` — full interactive execution, commit locally, no
