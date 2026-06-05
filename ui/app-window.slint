@@ -68,6 +68,9 @@ export component AppWindow inherits Window {
 
     in-out property <bool> autostart-enabled;
     callback set-autostart(bool);
+    // Asks Rust to refresh `autostart-enabled` from the registry, then open the
+    // Settings dialog.
+    callback open-settings();
 
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
@@ -111,7 +114,7 @@ export component AppWindow inherits Window {
                 TxtButton {
                     text: Strings.btn-settings;
                     clicked => {
-                        root.show-settings = true;
+                        root.open-settings();
                     }
                 }
                 TxtButton {

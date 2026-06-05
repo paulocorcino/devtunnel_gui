@@ -333,7 +333,6 @@ export component SettingsDialog inherits Rectangle {
     in-out property <bool> open;
     in-out property <bool> autostart-enabled;
     callback toggled(bool);
-    callback close();
 
     visible: root.open;
     background: #00000099;
@@ -377,7 +376,6 @@ export component SettingsDialog inherits Rectangle {
                     primary: true;
                     clicked => {
                         root.open = false;
-                        root.close();
                     }
                 }
             }

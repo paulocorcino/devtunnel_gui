@@ -403,18 +403,31 @@ fn main() -> anyhow::Result<()> {
     }
 
     // ---- Settings dialog: autostart toggle ----
-    // Reflect the current registry state every time the dialog is opened.
+    // Seed the toggle from the registry at startup.
     app.set_autostart_enabled(autostart::is_enabled());
     {
         let weak = app.as_weak();
         let loc = loc.clone();
         app.on_set_autostart(move |enabled| {
+            let Some(a) = weak.upgrade() else { return };
             if let Err(e) = autostart::set_enabled(enabled) {
-                if let Some(a) = weak.upgrade() {
-                    let mut args = FluentArgs::new();
-                    args.set("message", e.to_string());
-                    a.set_status(loc.t_args("status-error", &args).into());
-                }
+                let mut args = FluentArgs::new();
+                args.set("message", e.to_string());
+                a.set_status(loc.t_args("status-error", &args).into());
+            }
+            // Re-read the registry so the checkbox reflects the actual state
+            // (reverts the optimistic toggle if the write failed).
+            a.set_autostart_enabled(autostart::is_enabled());
+        });
+    }
+    {
+        // Re-sync the toggle from the registry each time the dialog opens, in
+        // case the Run entry changed out of band.
+        let weak = app.as_weak();
+        app.on_open_settings(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_autostart_enabled(autostart::is_enabled());
+                a.set_show_settings(true);
             }
         });
     }
