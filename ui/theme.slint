@@ -1,0 +1,49 @@
+// Fonte única de cores, espaçamento e tipografia. Ver docs/design/0001-ui-design.md.
+// Regra do projeto: nenhum componente hard-coda cor/medida — sempre Theme.*.
+
+export global Theme {
+    // Alterne para dark mode a partir do Rust:
+    //   app.global::<Theme>().set_dark(true)
+    in-out property <bool> dark: false;
+
+    // Superfícies
+    out property <color> bg:        dark ? #0f1117 : #ffffff;
+    out property <color> surface:   dark ? #171a21 : #f7f8fa;
+    out property <color> surface-2: dark ? #1e222b : #ffffff;
+    out property <color> border:    dark ? #262b36 : #e5e7eb;
+
+    // Texto
+    out property <color> text:  dark ? #e6e8ee : #1f2330;
+    out property <color> muted: dark ? #9aa3b2 : #6b7280;
+
+    // Acento
+    out property <color> accent:      dark ? #6366f1 : #4f46e5;
+    out property <color> accent-text: #ffffff;
+
+    // Status
+    out property <color> ok:   dark ? #22c55e : #16a34a;
+    out property <color> warn: dark ? #f59e0b : #d97706;
+    out property <color> down: dark ? #ef4444 : #dc2626;
+    out property <color> idle: #9ca3af;
+
+    // Métricas
+    out property <length> radius: 8px;
+    out property <length> gap:    8px;
+    out property <length> pad:    12px;
+
+    // Tipografia
+    out property <length> fs-title:   17px;
+    out property <length> fs-section: 13px;
+    out property <length> fs-body:    12px;
+    out property <length> fs-caption: 11px;
+    out property <string> mono: "Consolas";
+
+    // Cor de status a partir de um identificador ("ok"/"warn"/"down"/"idle"/"host").
+    pure public function status-color(s: string) -> color {
+        s == "ok"   ? ok :
+        s == "warn" ? warn :
+        s == "down" ? down :
+        s == "host" ? accent :
+        idle
+    }
+}

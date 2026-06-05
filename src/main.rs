@@ -112,6 +112,8 @@ fn load_async(weak: slint::Weak<AppWindow>) {
                             protocol: r.protocol.into(),
                             url: r.url.into(),
                             expiration: r.expiration.into(),
+                            // Status real chega na #4 (sonda). Por ora: idle.
+                            status: "idle".into(),
                         })
                         .collect();
                     app.set_rows(ModelRc::new(VecModel::from(model)));

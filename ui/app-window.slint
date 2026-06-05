@@ -1,4 +1,5 @@
-import { Button, ListView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+import { ListView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
 
 // Uma linha = uma porta de um grupo (túnel), com sua Public URL.
 export struct PortRow {
@@ -7,14 +8,79 @@ export struct PortRow {
     protocol: string,
     url: string,
     expiration: string,
+    status: string, // "idle" | "ok" | "warn" | "down" | "host"  (ver theme.slint)
+}
+
+// Ponto de status colorido pelo estado.
+component StatusDot inherits Rectangle {
+    in property <string> status: "idle";
+    width: 9px;
+    height: 9px;
+    border-radius: self.width / 2;
+    background: Theme.status-color(root.status);
+}
+
+// Chip pequeno (protocolo, expiração).
+component Pill inherits Rectangle {
+    in property <string> text;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: 6px;
+    height: 18px;
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 6px;
+        Text {
+            text: root.text;
+            color: Theme.muted;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Botão de texto temático (primary filled / ghost outline).
+component TxtButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> primary: false;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 30px;
+    border-radius: Theme.radius;
+    border-width: root.primary ? 0px : 1px;
+    border-color: Theme.border;
+    background: root.primary ? Theme.accent : Theme.surface;
+    opacity: !root.enabled ? 0.45 : (ta.pressed ? 0.8 : (ta.has-hover ? 0.92 : 1.0));
+
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        Text {
+            text: root.text;
+            color: root.primary ? Theme.accent-text : Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+            horizontal-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
 }
 
 export component AppWindow inherits Window {
     title: "DevTunnel GUI";
-    preferred-width: 780px;
-    preferred-height: 500px;
-    min-width: 520px;
-    min-height: 320px;
+    preferred-width: 820px;
+    preferred-height: 560px;
+    min-width: 560px;
+    min-height: 380px;
+    background: Theme.bg;
 
     in property <[PortRow]> rows;
     in property <string> status: "carregando…";
@@ -23,72 +89,104 @@ export component AppWindow inherits Window {
     callback copy-url(string);
     callback open-url(string);
 
-    VerticalBox {
-        padding: 12px;
-        spacing: 8px;
-
-        HorizontalBox {
-            spacing: 8px;
-            Text {
-                text: "Dev Tunnels";
-                font-size: 18px;
-                font-weight: 700;
-                vertical-alignment: center;
-            }
-            Rectangle { horizontal-stretch: 1; }
-            Text {
-                text: root.status;
-                color: gray;
-                vertical-alignment: center;
-            }
-            Button {
-                text: "Atualizar";
-                clicked => { root.refresh(); }
+    VerticalLayout {
+        // ---- Top bar ----
+        Rectangle {
+            background: Theme.surface;
+            height: 52px;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                spacing: Theme.gap;
+                Text {
+                    text: "Dev Tunnels";
+                    color: Theme.text;
+                    font-size: Theme.fs-title;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                Pill { text: root.status; }
+                TxtButton {
+                    text: "Atualizar";
+                    primary: true;
+                    clicked => {
+                        root.refresh();
+                    }
+                }
             }
         }
+        Rectangle { height: 1px; background: Theme.border; }
 
+        // ---- Lista ----
         ListView {
             for row in root.rows : Rectangle {
-                height: 64px;
-                touch := TouchArea { }
-                background: touch.has-hover ? #f3f4f6 : transparent;
-                border-radius: 6px;
+                height: 56px;
+                hover := TouchArea { }
+                background: hover.has-hover ? Theme.surface-2 : transparent;
 
-                HorizontalBox {
-                    padding-left: 10px;
-                    padding-right: 10px;
-                    spacing: 8px;
+                HorizontalLayout {
+                    padding-left: Theme.pad;
+                    padding-right: Theme.pad;
+                    spacing: 10px;
 
-                    VerticalBox {
+                    // status
+                    VerticalLayout {
+                        alignment: center;
+                        StatusDot { status: row.status; }
+                    }
+
+                    // porta + url + meta
+                    VerticalLayout {
                         spacing: 2px;
                         alignment: center;
-                        Text {
-                            text: row.group;
-                            font-size: 13px;
-                            font-weight: 600;
+                        HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                text: "\{row.port}";
+                                color: Theme.text;
+                                font-size: Theme.fs-section;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                            Pill { text: row.protocol == "" ? "—" : row.protocol; }
+                            Text {
+                                text: row.url == "" ? "(sem URL — porta não configurada)" : row.url;
+                                color: row.url == "" ? Theme.muted : Theme.accent;
+                                font-size: Theme.fs-body;
+                                font-family: Theme.mono;
+                                overflow: elide;
+                                vertical-alignment: center;
+                            }
                         }
                         Text {
-                            text: "porta \{row.port} · \{row.protocol} · expira: \{row.expiration}";
-                            color: gray;
-                            font-size: 11px;
-                        }
-                        Text {
-                            text: row.url == "" ? "(sem URL — porta não configurada)" : row.url;
-                            color: row.url == "" ? gray : #0a7c4a;
-                            font-size: 11px;
-                            overflow: elide;
+                            text: "\{row.group} · expira: \{row.expiration}";
+                            color: Theme.muted;
+                            font-size: Theme.fs-caption;
                         }
                     }
+
                     Rectangle { horizontal-stretch: 1; }
-                    Button {
-                        text: "Copiar";
-                        enabled: row.url != "";
-                        clicked => { root.copy-url(row.url); }
-                    }
-                    Button {
-                        text: "Abrir";
-                        enabled: row.url != "";
-                        clicked => { root.open-url(row.url); }
+
+                    VerticalLayout {
+                        alignment: center;
+                        HorizontalLayout {
+                            spacing: 6px;
+                            TxtButton {
+                                text: "Copiar";
+                                enabled: row.url != "";
+                                clicked => {
+                                    root.copy-url(row.url);
+                                }
+                            }
+                            TxtButton {
+                                text: "Abrir";
+                                enabled: row.url != "";
+                                clicked => {
+                                    root.open-url(row.url);
+                                }
+                            }
+                        }
                     }
                 }
             }
