@@ -206,7 +206,10 @@ notifications. The probe interval is configurable in code (default 60s) but a se
   `PATH="/c/Strawberry/perl/bin:/c/Strawberry/c/bin:/c/Users/PICHAU/AppData/Local/bin/NASM:$PATH" cargo build --features hosting`
   (the `hosting` feature compiles vendored OpenSSL → needs NASM + Strawberry Perl + MSVC).
 - Lint/test gates: `cargo test` (and `cargo test --features hosting` for hosting stages),
-  `cargo fmt --check`, `cargo clippy` (+ `--features hosting`).
+  `cargo clippy` (+ `--features hosting`). NOTE: the baseline already has pre-existing rustfmt
+  drift in `src/main.rs`, so repo-wide `cargo fmt --check` is NOT a pass/fail gate. Instead run
+  `cargo fmt -- <only the files you created/edited>` so YOUR files are clean; never reformat files
+  outside your stage scope.
 - Invariants: English only (no Portuguese in any file); every UI string via Fluent
   (`i18n/en-US/app.ftl` → `ui/strings.slint` `Strings.*` → `apply_strings` in `main.rs`), never a
   raw literal in Rust/Slint; no hard-coded color/size in `.slint` — use `Theme.*`; SDK hosting code
@@ -298,7 +301,7 @@ N. Gates pass -> write the post-stage report -> stage code files AND the
 - `cargo build` (default, no feature) — compiles; `NoopHost` path active.
 - `cargo build --features hosting` with `PATH="/c/Strawberry/perl/bin:/c/Strawberry/c/bin:/c/Users/PICHAU/AppData/Local/bin/NASM:$PATH"` — compiles (this triggers the vendored-OpenSSL build).
 - `cargo test` — existing `sanitize_tunnel_id` tests still pass.
-- `cargo fmt --check` and `cargo clippy` — clean.
+- `cargo fmt -- src/host/mod.rs src/devtunnel.rs` (your files only) and `cargo clippy` — clean.
 
 **Manual verification (if any):** none
 
