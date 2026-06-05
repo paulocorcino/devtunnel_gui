@@ -29,6 +29,10 @@ env_logger = { version = "0.11", optional = true }
 # OpenSSL dependency for the probe itself. Optional: only pulled by `hosting`.
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
+# Initial dark-mode detection: read the Windows "apps use light theme" setting.
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+
 [features]
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
 # Integrated SDK hosting + health probe (issue #4). Kept gated so the default

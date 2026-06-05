@@ -155,6 +155,10 @@ fn main() -> anyhow::Result<()> {
 
     let app = AppWindow::new()?;
 
+    // Dark mode is first-class: start from the Windows app theme; the ⚙
+    // affordance in the top bar toggles it at runtime.
+    app.global::<Theme>().set_dark(system_prefers_dark());
+
     let loc = Rc::new(Locale::load(&locale::system_locale()));
     apply_strings(&app, &loc);
 
@@ -566,6 +570,24 @@ fn main() -> anyhow::Result<()> {
     // terminate the whole process the moment the window is closed/hidden.
     slint::run_event_loop_until_quit()?;
     Ok(())
+}
+
+/// True when Windows is set to dark app mode (`AppsUseLightTheme == 0`).
+/// Defaults to light when the value is missing or unreadable.
+#[cfg(windows)]
+fn system_prefers_dark() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
+        .map(|v| v == 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn system_prefers_dark() -> bool {
+    false
 }
 
 fn show_window(weak: &slint::Weak<AppWindow>) {
