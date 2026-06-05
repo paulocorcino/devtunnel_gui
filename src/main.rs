@@ -1,6 +1,7 @@
 // Hide the console window on Windows in release builds (tray app).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod config;
 mod devtunnel;
 mod host;
 mod locale;
@@ -191,6 +192,10 @@ fn main() -> anyhow::Result<()> {
 
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
+
+    // Group IDs that were hosted in the previous session and should be re-hosted
+    // automatically after the first successful load.
+    let auto_host_ids: Rc<RefCell<HashSet<String>>> = Rc::new(RefCell::new(config::load().ids));
 
     // ---- Host + probe engines ----
     // The host engine starts in every build (it is a no-op without `hosting`);
@@ -412,12 +417,20 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let auto_host = auto_host_ids.clone();
         app.on_host(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Host {
                 tunnel_id: id.clone(),
             });
-            state.borrow_mut().host.insert(id, "host".to_string());
+            state
+                .borrow_mut()
+                .host
+                .insert(id.clone(), "host".to_string());
+            auto_host.borrow_mut().insert(id.clone());
+            config::save(&config::AutoHostStore {
+                ids: auto_host.borrow().clone(),
+            });
             if let Some(a) = weak.upgrade() {
                 rebuild_rows(&a, &tray, &actions, &state, &loc);
             }
@@ -430,6 +443,7 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let auto_host = auto_host_ids.clone();
         app.on_stop(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Stop {
@@ -440,6 +454,10 @@ fn main() -> anyhow::Result<()> {
             // Drop probe results for this group's ports so badges clear.
             st.probe.retain(|(tid, _), _| tid != &id);
             drop(st);
+            auto_host.borrow_mut().remove(&id);
+            config::save(&config::AutoHostStore {
+                ids: auto_host.borrow().clone(),
+            });
             if let Some(a) = weak.upgrade() {
                 rebuild_rows(&a, &tray, &actions, &state, &loc);
             }
@@ -456,6 +474,9 @@ fn main() -> anyhow::Result<()> {
         let actions = actions.clone();
         let loc = loc.clone();
         let state = state.clone();
+        let host_for_resume = tunnel_host.clone();
+        let auto_host_ids_pump = auto_host_ids.clone();
+        let mut auto_resumed = false;
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -483,6 +504,40 @@ fn main() -> anyhow::Result<()> {
                 while let Ok((placeholder_id, result)) = rx.try_recv() {
                     apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
                     loaded = true;
+                }
+
+                // On the first successful load, re-host any group that was active in
+                // the previous session and is still present in the fetched rows.
+                if loaded && !auto_resumed {
+                    auto_resumed = true;
+                    let persisted: HashSet<String> = auto_host_ids_pump.borrow().clone();
+                    if !persisted.is_empty() {
+                        let live_ids: HashSet<String> = state
+                            .borrow()
+                            .rows
+                            .iter()
+                            .map(|r| r.tunnel_id.clone())
+                            .collect();
+                        let to_host: Vec<String> = persisted
+                            .iter()
+                            .filter(|id| live_ids.contains(*id))
+                            .cloned()
+                            .collect();
+                        for id in &to_host {
+                            host_for_resume.send(host::HostCommand::Host {
+                                tunnel_id: id.clone(),
+                            });
+                            state
+                                .borrow_mut()
+                                .host
+                                .insert(id.clone(), "host".to_string());
+                        }
+                        if !to_host.is_empty() {
+                            if let Some(a) = weak.upgrade() {
+                                rebuild_rows(&a, &tray, &actions, &state, &loc);
+                            }
+                        }
+                    }
                 }
 
                 // Host engine state changes -> update per-group host state.
