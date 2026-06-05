@@ -27,10 +27,32 @@ export global Theme {
     out property <color> idle:         #9ca3af;
     out property <color> provisioning: dark ? #a78bfa : #7c3aed;
 
-    // Metrics
+    // Metrics — 8px spacing scale
     out property <length> radius: 8px;
+    out property <length> gap-sm: 4px;
     out property <length> gap:    8px;
+    out property <length> gap-lg: 16px;
     out property <length> pad:    12px;
+
+    // Control sizes
+    out property <length> dot-size:        9px;
+    out property <length> pill-height:     18px;
+    out property <length> btn-height:      30px;
+    out property <length> icon-btn-size:   26px;
+    out property <length> toggle-width:    36px;
+    out property <length> toggle-height:   20px;
+    out property <length> toggle-knob:     14px;
+
+    // Layout metrics
+    out property <length> topbar-height:   52px;
+    out property <length> row-height:      40px;
+    out property <length> card-header-height: 44px;
+    out property <length> dialog-width:    380px;
+    out property <length> empty-card-width: 320px;
+
+    // Toast
+    out property <length>   toast-height:   34px;
+    out property <duration> toast-duration: 2400ms;
 
     // Typography
     out property <length> fs-title:   17px;
