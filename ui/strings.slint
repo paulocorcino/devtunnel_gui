@@ -61,6 +61,14 @@ export global Strings {
     in property <string> new-group-option: "+ New group…";
     in property <string> ph-port: "e.g. 3000";
 
+    // Preflight banner / re-login
+    in property <string> banner-cli-missing-title: "Dev Tunnels CLI not found";
+    in property <string> banner-cli-missing-body: "The `devtunnel` CLI is required but was not found on PATH.";
+    in property <string> banner-cli-missing-install: "Install it with: winget install Microsoft.devtunnel — or set DEVTUNNEL_BIN to the executable path.";
+    in property <string> banner-relogin-title: "Sign in required";
+    in property <string> banner-relogin-body: "Your Dev Tunnels login is missing or has expired. Sign in to continue.";
+    in property <string> btn-sign-in: "Sign in";
+
     // Confirmation dialog (message text is set from Rust with arguments)
     in property <string> confirm-message: "";
 }

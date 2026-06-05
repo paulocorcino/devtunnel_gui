@@ -828,6 +828,14 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_ph_expiration(loc.t("ph-expiration").into());
     s.set_ph_description(loc.t("ph-description").into());
 
+    // Preflight banner / re-login
+    s.set_banner_cli_missing_title(loc.t("banner-cli-missing-title").into());
+    s.set_banner_cli_missing_body(loc.t("banner-cli-missing-body").into());
+    s.set_banner_cli_missing_install(loc.t("banner-cli-missing-install").into());
+    s.set_banner_relogin_title(loc.t("banner-relogin-title").into());
+    s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
+    s.set_btn_sign_in(loc.t("btn-sign-in").into());
+
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());
     s.set_field_group(loc.t("field-group").into());
