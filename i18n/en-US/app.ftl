@@ -88,3 +88,4 @@ err-cli-failed = `devtunnel { $args }` returned error: { $stderr }
 err-cli-invalid-json = invalid JSON from `devtunnel { $args }`
 err-empty-group-name = group name must contain at least one letter or digit
 err-invalid-port = port number must be between 1 and 65535
+err-port-not-found = port { $port } not found in tunnel { $tunnel }
