@@ -840,6 +840,14 @@ an inline QA prompt that takes the plan + diff range as input.
 ## End-to-end summary (parent fills after final stage)
 | Stage | Title | Tier | Effort | Model used | Commit SHA | Status | Report |
 |-------|-------|------|--------|------------|------------|--------|--------|
+| 1 | hosting feature + host module skeleton | judgment | extended | opus | `165913b` | green | stage-1-report.md |
+| 2 | SDK host engine (connect/keep-alive/stop) | critical | extended | opus | `63f83e9` | green | stage-2-report.md |
+| 3 | Health probe engine (ureq, 3-state) | standard | standard | sonnet | `26261b8` | green | stage-3-report.md |
+| 4 | UI + main.rs wiring (toggle + badges) | judgment | extended | opus | `f365b7b` | green | stage-4-report.md |
+| 5 | HITL: empirical 502/503 + live end-to-end | critical | extended | — | _pending_ | **HITL — awaiting operator** | — |
+
+Reviewer gate (light): **pass-with-notes** — all notes non-blocking; the broad `"tunnel"` relay
+marker in `probe.rs` is flagged for Stage 5 HITL tuning.
 <!-- one row per stage. `Model used` is what the executor actually selected
 on its platform for the declared Tier/Effort (the executor fills this — the
 plan never prescribes model names). Used post-hoc to audit whether the
