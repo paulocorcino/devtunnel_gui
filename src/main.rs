@@ -189,6 +189,9 @@ fn main() -> anyhow::Result<()> {
     // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
     let (tx, rx) = std::sync::mpsc::channel::<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>();
 
+    // Preflight results (startup probe + after sign-in) pumped to the UI thread.
+    let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
+
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
 
@@ -218,6 +221,29 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         let loc = loc.clone();
         app.on_refresh(move || load_async(&weak, &tx, &loc));
+    }
+
+    // ---- Sign in (re-login banner) ----
+    // Runs `devtunnel user login` on a background thread (interactive — opens
+    // the browser), then re-runs preflight; the pump applies the new state and
+    // reloads when it is Ok. On failure preflight re-detects LoggedOut, so the
+    // banner simply stays up.
+    {
+        let weak = app.as_weak();
+        let pf_tx = pf_tx.clone();
+        let loc = loc.clone();
+        app.on_sign_in(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_status(loc.t("status-signing-in").into());
+            }
+            let pf_tx = pf_tx.clone();
+            let lang = locale::system_locale();
+            std::thread::spawn(move || {
+                let loc = Locale::load(&lang);
+                let _ = devtunnel::user_login(&loc);
+                let _ = pf_tx.send(devtunnel::preflight());
+            });
+        });
     }
 
     // Pending deletion (set when a delete is requested, consumed on confirm).
@@ -456,6 +482,7 @@ fn main() -> anyhow::Result<()> {
         let actions = actions.clone();
         let loc = loc.clone();
         let state = state.clone();
+        let tx = tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -476,6 +503,22 @@ fn main() -> anyhow::Result<()> {
                 while let Ok(ev) = tray_rx.try_recv() {
                     if let TrayIconEvent::Click { .. } = ev {
                         toggle_window(&weak);
+                    }
+                }
+                // Preflight results -> set app-state, swap the tray icon, and
+                // kick the initial load when the environment is ready.
+                while let Ok(pf) = pf_rx.try_recv() {
+                    let app_state = match pf {
+                        devtunnel::Preflight::Ok => "ready",
+                        devtunnel::Preflight::CliMissing => "cli-missing",
+                        devtunnel::Preflight::LoggedOut => "relogin",
+                    };
+                    if let Some(a) = weak.upgrade() {
+                        a.set_app_state(app_state.into());
+                    }
+                    update_tray_icon(&tray, app_state);
+                    if pf == devtunnel::Preflight::Ok {
+                        load_async(&weak, &tx, &loc);
                     }
                 }
                 // Load result: apply to UI and rebuild tray menu.
@@ -500,6 +543,12 @@ fn main() -> anyhow::Result<()> {
                             let mut args = FluentArgs::new();
                             args.set("message", msg.clone());
                             a.set_status(loc.t_args("status-error", &args).into());
+                            // Login expiry during hosting switches the app into
+                            // the re-login state (banner + warning tray icon).
+                            if devtunnel::is_auth_error(msg) {
+                                a.set_app_state("relogin".into());
+                                update_tray_icon(&tray, "relogin");
+                            }
                         }
                     }
                     let id = map_host_state(&hs);
@@ -556,8 +605,15 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // ---- Initial load ----
-    load_async(&app.as_weak(), &tx, &loc);
+    // ---- Initial preflight (background) ----
+    // Sets app-state from the probe; the pump kicks the first load only when
+    // the environment is ready (CLI present + logged in).
+    {
+        let pf_tx = pf_tx.clone();
+        std::thread::spawn(move || {
+            let _ = pf_tx.send(devtunnel::preflight());
+        });
+    }
 
     // Start minimized to tray: never call `show()`, just run the event loop.
     // The window appears via tray icon click or the "Open window" menu item.
@@ -694,8 +750,15 @@ fn apply_rows(
         Err(e) => {
             // Rebuild so that the removed placeholder is no longer shown.
             rebuild_rows(&app, tray, actions, state, loc);
+            let msg = e.to_string();
+            // Login expiry during management switches the app into the
+            // re-login state (banner + warning tray icon).
+            if devtunnel::is_auth_error(&msg) {
+                app.set_app_state("relogin".into());
+                update_tray_icon(tray, "relogin");
+            }
             let mut args = FluentArgs::new();
-            args.set("message", e.to_string());
+            args.set("message", msg);
             app.set_status(loc.t_args("status-error", &args).into());
         }
     }
@@ -911,4 +974,26 @@ fn build_icon() -> Icon {
     }
     // String literal kept here intentionally: build_icon() runs before Locale is loaded.
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Solid amber 32×32 warning icon shown while the app is not "ready"
+/// (CLI missing / re-login required).
+fn build_warning_icon() -> Icon {
+    const SIZE: u32 = 32;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for _ in 0..(SIZE * SIZE) {
+        rgba.extend_from_slice(&[0xf5, 0x9e, 0x0b, 0xff]); // amber
+    }
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Swaps the tray icon to match the app-level preflight state: the normal blue
+/// icon when "ready", the warning variant otherwise.
+fn update_tray_icon(tray: &tray_icon::TrayIcon, app_state: &str) {
+    let icon = if app_state == "ready" {
+        build_icon()
+    } else {
+        build_warning_icon()
+    };
+    let _ = tray.set_icon(Some(icon));
 }
