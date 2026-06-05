@@ -63,6 +63,9 @@ struct LiveState {
     placeholders: Vec<Placeholder>,
     /// Monotonic counter for placeholder ids.
     next_placeholder_id: u64,
+    /// Port whose detail panel is expanded, keyed by (tunnel_id, port).
+    /// `None` = collapsed; the metrics poll is a no-op while collapsed.
+    detail: Option<(String, i32)>,
 }
 
 impl LiveState {
@@ -187,6 +190,11 @@ fn main() -> anyhow::Result<()> {
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
     // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
     let (tx, rx) = std::sync::mpsc::channel::<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>();
+
+    // Selected-port metrics results, tagged with (tunnel_id, port) so the pump
+    // can drop results that arrive after the selection changed.
+    let (metrics_tx, metrics_rx) =
+        std::sync::mpsc::channel::<(String, i32, anyhow::Result<devtunnel::PortMetrics>)>();
 
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
@@ -445,6 +453,61 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- Port detail panel: row click toggles selection ----
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        let loc = loc.clone();
+        let metrics_tx = metrics_tx.clone();
+        app.on_toggle_detail(move |index, tunnel_id, port| {
+            let tid = tunnel_id.to_string();
+            let mut st = state.borrow_mut();
+            let same = st
+                .detail
+                .as_ref()
+                .is_some_and(|(t, p)| *t == tid && *p == port);
+            if same {
+                // Collapse: clear the selection; the poll timer goes idle.
+                st.detail = None;
+                drop(st);
+                if let Some(a) = weak.upgrade() {
+                    a.set_selected_index(-1);
+                }
+            } else {
+                st.detail = Some((tid.clone(), port));
+                drop(st);
+                if let Some(a) = weak.upgrade() {
+                    a.set_selected_index(index);
+                    // Show "n/a" until the first poll lands; logs straight away.
+                    apply_metrics(&a, None, &loc);
+                    refresh_logs(&a);
+                }
+                spawn_metrics_fetch(&metrics_tx, tid, port);
+            }
+        });
+    }
+
+    // ---- Port detail polling: refresh metrics + logs while a panel is open ----
+    // A no-op while collapsed (detail == None), so no CLI calls are wasted.
+    let detail_timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        let metrics_tx = metrics_tx.clone();
+        detail_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(3),
+            move || {
+                let selected = state.borrow().detail.clone();
+                let Some((tid, port)) = selected else { return };
+                spawn_metrics_fetch(&metrics_tx, tid, port);
+                if let Some(a) = weak.upgrade() {
+                    refresh_logs(&a);
+                }
+            },
+        );
+    }
+
     // ---- Pump events (tray + load results) into the Slint loop via Timer ----
     let menu_rx = MenuEvent::receiver();
     let tray_rx = TrayIconEvent::receiver();
@@ -482,6 +545,22 @@ fn main() -> anyhow::Result<()> {
                 while let Ok((placeholder_id, result)) = rx.try_recv() {
                     apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
                     loaded = true;
+                }
+
+                // Selected-port metrics -> detail panel (skip stale selections).
+                while let Ok((tid, port, result)) = metrics_rx.try_recv() {
+                    let current = state
+                        .borrow()
+                        .detail
+                        .as_ref()
+                        .is_some_and(|(t, p)| *t == tid && *p == port);
+                    if !current {
+                        continue;
+                    }
+                    if let Some(a) = weak.upgrade() {
+                        // Errors (port deleted, CLI hiccup) degrade to "n/a".
+                        apply_metrics(&a, result.ok().as_ref(), &loc);
+                    }
                 }
 
                 // Host engine state changes -> update per-group host state.
@@ -741,11 +820,103 @@ fn rebuild_rows(
         });
     }
 
+    // Recompute the expanded row's index: rows can reorder or disappear across
+    // reloads, so the selection is keyed by (tunnel_id, port), not by index.
+    let mut selected = -1;
+    let mut stale_detail = false;
+    if let Some((tid, port)) = st.detail.as_ref() {
+        match model
+            .iter()
+            .position(|r| r.tunnel_id == tid.as_str() && r.port == *port)
+        {
+            Some(i) => selected = i as i32,
+            None => stale_detail = true,
+        }
+    }
+
     // Rebuild the tray menu with per-port actions from the same data.
     let menu = build_tray_menu(&model, &mut actions.borrow_mut(), loc);
     tray.set_menu(Some(Box::new(menu)));
 
+    app.set_selected_index(selected);
     app.set_rows(ModelRc::new(VecModel::from(model)));
+
+    // The selected port no longer exists (deleted elsewhere): collapse so the
+    // poll timer stops issuing CLI calls for it.
+    drop(st);
+    if stale_detail {
+        state.borrow_mut().detail = None;
+    }
+}
+
+/// Fires a `fetch_port_status` for the selected port on a background thread;
+/// the tagged result comes back via the metrics channel drained in the pump.
+fn spawn_metrics_fetch(
+    tx: &Sender<(String, i32, anyhow::Result<devtunnel::PortMetrics>)>,
+    tunnel_id: String,
+    port: i32,
+) {
+    let tx = tx.clone();
+    let lang = locale::system_locale();
+    std::thread::spawn(move || {
+        let loc = Locale::load(&lang);
+        let result = devtunnel::fetch_port_status(&tunnel_id, port, &loc);
+        let _ = tx.send((tunnel_id, port, result));
+    });
+}
+
+/// Formats a byte count as a short human-readable value (e.g. "1.5 MB").
+/// Unit symbols are technical notation, intentionally not localized.
+fn human_bytes(v: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = v.max(0.0);
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", v as u64, UNITS[unit])
+    } else {
+        format!("{:.1} {}", v, UNITS[unit])
+    }
+}
+
+/// Pushes a metrics result into the detail panel. `None` (no data yet, fetch
+/// error, or CLI without the status block) renders every field as "n/a".
+fn apply_metrics(app: &AppWindow, metrics: Option<&devtunnel::PortMetrics>, loc: &Locale) {
+    let na = loc.t("metric-na");
+    let total = |v: Option<f64>| -> SharedString {
+        v.map(human_bytes).unwrap_or_else(|| na.clone()).into()
+    };
+    let rate = |v: Option<f64>| -> SharedString {
+        v.map(|b| {
+            let mut args = FluentArgs::new();
+            args.set("value", human_bytes(b));
+            loc.t_args("metric-rate-per-second", &args)
+        })
+        .unwrap_or_else(|| na.clone())
+        .into()
+    };
+    let count = |v: Option<f64>| -> SharedString {
+        v.map(|c| (c as i64).to_string())
+            .unwrap_or_else(|| na.clone())
+            .into()
+    };
+    app.set_detail_upload_total(total(metrics.and_then(|m| m.upload_total)));
+    app.set_detail_upload_rate(rate(metrics.and_then(|m| m.upload_rate)));
+    app.set_detail_download_total(total(metrics.and_then(|m| m.download_total)));
+    app.set_detail_download_rate(rate(metrics.and_then(|m| m.download_rate)));
+    app.set_detail_connections(count(metrics.and_then(|m| m.connection_count)));
+}
+
+/// Refreshes the Logs tab model from the capture ring buffer (oldest first).
+fn refresh_logs(app: &AppWindow) {
+    let lines: Vec<SharedString> = logbuf::snapshot()
+        .into_iter()
+        .map(SharedString::from)
+        .collect();
+    app.set_detail_logs(ModelRc::new(VecModel::from(lines)));
 }
 
 /// Builds the tray menu: "Open window", one submenu per port with URL actions
@@ -871,6 +1042,17 @@ mod tests {
 
         st.remove_placeholder(id2);
         assert!(st.placeholders.is_empty());
+    }
+
+    #[test]
+    fn human_bytes_scales_units() {
+        assert_eq!(human_bytes(0.0), "0 B");
+        assert_eq!(human_bytes(512.0), "512 B");
+        assert_eq!(human_bytes(1024.0), "1.0 KB");
+        assert_eq!(human_bytes(1536.0), "1.5 KB");
+        assert_eq!(human_bytes(5.0 * 1024.0 * 1024.0), "5.0 MB");
+        // Negative values clamp to zero instead of underflowing.
+        assert_eq!(human_bytes(-3.0), "0 B");
     }
 
     #[test]
