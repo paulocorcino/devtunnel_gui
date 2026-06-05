@@ -156,13 +156,16 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
 
                 // Sleep for the configured interval, checking for commands every second
                 // so the thread stays responsive to SetInterval / SetTargets updates.
+                // A SetTargets update breaks the sleep early so the new targets are
+                // probed immediately (otherwise a freshly-hosted group would show no
+                // health badge for up to `interval` seconds).
                 let steps = interval.as_secs().max(1);
                 for _ in 0..steps {
                     thread::sleep(Duration::from_secs(1));
-                    // Quick check: if the command channel closed, exit.
                     match cmd_rx.try_recv() {
                         Ok(ProbeCommand::SetTargets(new_targets)) => {
                             targets = new_targets;
+                            break; // re-probe immediately with the new targets
                         }
                         Ok(ProbeCommand::SetInterval(d)) => {
                             interval = d;
