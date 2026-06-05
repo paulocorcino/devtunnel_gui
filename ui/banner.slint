@@ -1,0 +1,64 @@
+// Preflight banner shown above the port list when the app is not ready:
+// "cli-missing" shows install guidance; "relogin" shows a Sign in button.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+
+export component PreflightBanner inherits Rectangle {
+    // "cli-missing" | "relogin" (the parent shows this banner only when the
+    // app state is not "ready").
+    in property <string> app-state;
+    // User clicked "Sign in" — Rust runs `devtunnel user login`.
+    callback sign-in();
+
+    background: Theme.surface;
+
+    VerticalLayout {
+        HorizontalLayout {
+            padding: Theme.pad;
+            spacing: Theme.gap;
+
+            VerticalLayout {
+                spacing: 2px;
+                alignment: center;
+                Text {
+                    text: root.app-state == "cli-missing"
+                        ? Strings.banner-cli-missing-title
+                        : Strings.banner-relogin-title;
+                    color: Theme.warn;
+                    font-size: Theme.fs-section;
+                    font-weight: 700;
+                }
+                Text {
+                    text: root.app-state == "cli-missing"
+                        ? Strings.banner-cli-missing-body
+                        : Strings.banner-relogin-body;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+                if root.app-state == "cli-missing" : Text {
+                    text: Strings.banner-cli-missing-install;
+                    color: Theme.muted;
+                    font-size: Theme.fs-caption;
+                    font-family: Theme.mono;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            if root.app-state == "relogin" : VerticalLayout {
+                alignment: center;
+                TxtButton {
+                    text: Strings.btn-sign-in;
+                    primary: true;
+                    clicked => {
+                        root.sign-in();
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+    }
+}

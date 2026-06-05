@@ -3,6 +3,7 @@ import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
+import { PreflightBanner } from "banner.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -68,7 +69,13 @@ export component AppWindow inherits Window {
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
 
+    // App-level preflight state: "ready" | "cli-missing" | "relogin".
+    // Non-ready states show the PreflightBanner above the list.
+    in property <string> app-state: "ready";
+
     callback refresh();
+    // User clicked "Sign in" in the re-login banner.
+    callback sign-in();
     // Start / stop hosting a group (by Real Tunnel ID).
     callback host(string /*tunnel-id*/);
     callback stop(string /*tunnel-id*/);
@@ -126,6 +133,14 @@ export component AppWindow inherits Window {
             }
         }
         Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Preflight banner (CLI missing / re-login) ----
+        if root.app-state != "ready" : PreflightBanner {
+            app-state: root.app-state;
+            sign-in => {
+                root.sign-in();
+            }
+        }
 
         // ---- List ----
         ListView {
