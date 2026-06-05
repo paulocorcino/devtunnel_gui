@@ -29,3 +29,4 @@ Desktop.ini
 
 # Staged-plan gate logs (local evidence, not versioned)
 docs/plans/logs/
+__pycache__/
