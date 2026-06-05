@@ -9,7 +9,10 @@ use std::process::Command;
 
 /// Uma porta achatada com sua URL, pronta para a UI.
 pub struct Row {
+    /// Nome amigável do grupo (cai para o tunnel_id quando o túnel não tem nome).
     pub group: String,
+    /// O Real Tunnel ID — a chave estável usada pelo serviço.
+    pub tunnel_id: String,
     pub port: i32,
     pub protocol: String,
     pub url: String,
@@ -53,12 +56,19 @@ pub fn fetch_rows() -> Result<Vec<Row>> {
 
     let mut rows = Vec::new();
     for t in list.tunnels {
+        // Nome amigável quando existe; o Real Tunnel ID é sempre a chave estável.
+        let group = if t.name.is_empty() {
+            t.tunnel_id.clone()
+        } else {
+            t.name.clone()
+        };
         match run_json::<ShowResult>(&["show", &t.tunnel_id, "-j"]) {
             Ok(show) => {
                 let exp = show.tunnel.tunnel_expiration;
                 if show.tunnel.ports.is_empty() {
                     rows.push(Row {
-                        group: t.tunnel_id.clone(),
+                        group: group.clone(),
+                        tunnel_id: t.tunnel_id.clone(),
                         port: 0,
                         protocol: String::new(),
                         url: String::new(),
@@ -67,7 +77,8 @@ pub fn fetch_rows() -> Result<Vec<Row>> {
                 } else {
                     for p in show.tunnel.ports {
                         rows.push(Row {
-                            group: t.tunnel_id.clone(),
+                            group: group.clone(),
+                            tunnel_id: t.tunnel_id.clone(),
                             port: p.port_number,
                             protocol: p.protocol,
                             url: p.port_uri.unwrap_or_default(),
@@ -78,7 +89,8 @@ pub fn fetch_rows() -> Result<Vec<Row>> {
             }
             // Se o `show` falhar para um túnel, ainda mostramos o grupo com o que temos.
             Err(_) => rows.push(Row {
-                group: t.tunnel_id.clone(),
+                group: group.clone(),
+                tunnel_id: t.tunnel_id.clone(),
                 port: 0,
                 protocol: String::new(),
                 url: String::new(),
