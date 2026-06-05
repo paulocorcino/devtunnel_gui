@@ -26,3 +26,6 @@ Desktop.ini
 # Claude / agents scratch (issues are tracked under docs/backlogs/, not here)
 .scratch/
 .claude/
+
+# Staged-plan gate logs (local evidence, not versioned)
+docs/plans/logs/
