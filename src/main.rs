@@ -701,9 +701,11 @@ fn apply_rows(
     }
 }
 
-/// Rebuilds the Slint row model and tray menu from the cached load, deriving each
-/// row's `status` and `host-state` from the latest probe/host events. Runs on the
-/// UI thread (after a load, or when a host/probe event updates derived state).
+/// Rebuilds the Slint group model and tray menu from the cached load, folding the
+/// flat CLI rows into per-group `GroupView`s with nested `PortView`s. Each port's
+/// `status` and each group's `hosting` flag derive from the latest probe/host
+/// events. Runs on the UI thread (after a load, or when a host/probe event
+/// updates derived state).
 fn rebuild_rows(
     app: &AppWindow,
     tray: &tray_icon::TrayIcon,
@@ -712,46 +714,95 @@ fn rebuild_rows(
     loc: &Rc<Locale>,
 ) {
     let st = state.borrow();
-    let mut model: Vec<PortRow> = st
-        .rows
-        .iter()
-        .map(|r| PortRow {
-            group: r.group.clone().into(),
-            tunnel_id: r.tunnel_id.clone().into(),
-            port: r.port,
-            protocol: r.protocol.clone().into(),
-            url: r.url.clone().into(),
-            expiration: r.expiration.clone().into(),
-            status: derive_status(&st, &r.tunnel_id, r.port).into(),
-            host_state: derive_host_state(&st, &r.tunnel_id).into(),
-        })
-        .collect();
 
-    // Append a placeholder row for each in-flight create operation.
-    // Placeholders have empty url/expiration/tunnel_id so they are skipped by build_tray_menu.
-    for p in &st.placeholders {
-        model.push(PortRow {
-            group: p.group.clone().into(),
-            tunnel_id: SharedString::new(),
-            port: p.port,
-            protocol: p.protocol.clone().into(),
-            url: SharedString::new(),
-            expiration: SharedString::new(),
-            status: "provisioning".into(),
-            host_state: SharedString::new(),
-        });
+    // Fold the flat rows into groups (Real Tunnel ID order preserved). Ports are
+    // collected separately and attached as models at the end.
+    let mut groups: Vec<GroupView> = Vec::new();
+    let mut ports: Vec<Vec<PortView>> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for r in &st.rows {
+        let gi = match index.get(&r.tunnel_id) {
+            Some(&i) => i,
+            None => {
+                index.insert(r.tunnel_id.clone(), groups.len());
+                groups.push(GroupView {
+                    group: r.group.clone().into(),
+                    tunnel_id: r.tunnel_id.clone().into(),
+                    expiration: r.expiration.clone().into(),
+                    hosting: derive_host_state(&st, &r.tunnel_id) == "hosting",
+                    provisioning: false,
+                    has_port: false,
+                    ports: ModelRc::default(),
+                });
+                ports.push(Vec::new());
+                groups.len() - 1
+            }
+        };
+        // A port==0 row is a portless group: keep the card, skip the port row.
+        if r.port != 0 {
+            groups[gi].has_port = true;
+            ports[gi].push(PortView {
+                port: r.port,
+                protocol: r.protocol.clone().into(),
+                url: r.url.clone().into(),
+                status: derive_status(&st, &r.tunnel_id, r.port).into(),
+            });
+        }
     }
 
-    // Rebuild the tray menu with per-port actions from the same data.
-    let menu = build_tray_menu(&model, &mut actions.borrow_mut(), loc);
+    // Optimistic placeholders for in-flight creates: attach the provisioning
+    // port to its existing group (matched by friendly name) when possible,
+    // otherwise add a whole provisioning card.
+    for p in &st.placeholders {
+        match groups.iter().position(|g| g.group == p.group.as_str()) {
+            Some(gi) if p.port != 0 => ports[gi].push(PortView {
+                port: p.port,
+                protocol: p.protocol.clone().into(),
+                url: SharedString::new(),
+                status: "provisioning".into(),
+            }),
+            _ => {
+                groups.push(GroupView {
+                    group: p.group.clone().into(),
+                    tunnel_id: SharedString::new(),
+                    expiration: SharedString::new(),
+                    hosting: false,
+                    provisioning: true,
+                    has_port: p.port != 0,
+                    ports: ModelRc::default(),
+                });
+                ports.push(if p.port != 0 {
+                    vec![PortView {
+                        port: p.port,
+                        protocol: p.protocol.clone().into(),
+                        url: SharedString::new(),
+                        status: "provisioning".into(),
+                    }]
+                } else {
+                    Vec::new()
+                });
+            }
+        }
+    }
+    for (g, pv) in groups.iter_mut().zip(ports) {
+        g.ports = ModelRc::new(VecModel::from(pv));
+    }
+
+    // Rebuild the tray menu with per-port actions from the same load (placeholders
+    // have no URL, so they are skipped by build_tray_menu).
+    let menu = build_tray_menu(&st.rows, &mut actions.borrow_mut(), loc);
     tray.set_menu(Some(Box::new(menu)));
 
-    app.set_rows(ModelRc::new(VecModel::from(model)));
+    app.set_groups(ModelRc::new(VecModel::from(groups)));
 }
 
 /// Builds the tray menu: "Open window", one submenu per port with URL actions
 /// (Copy / Open) and "Quit". Repopulates the `MenuId -> Action` map.
-fn build_tray_menu(rows: &[PortRow], actions: &mut HashMap<MenuId, Action>, loc: &Locale) -> Menu {
+fn build_tray_menu(
+    rows: &[devtunnel::Row],
+    actions: &mut HashMap<MenuId, Action>,
+    loc: &Locale,
+) -> Menu {
     actions.clear();
     let menu = Menu::new();
 
@@ -811,6 +862,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     // Redesign: status-dot tooltips, top bar, row tooltips, toast, empty state
     s.set_badge_stopped(loc.t("badge-stopped").into());
     s.set_badge_hosting(loc.t("badge-hosting").into());
+    s.set_app_title(loc.t("app-title").into());
     s.set_pill_connected(loc.t("pill-connected").into());
     s.set_tooltip_settings(loc.t("tooltip-settings").into());
     s.set_tooltip_copy(loc.t("tooltip-copy").into());

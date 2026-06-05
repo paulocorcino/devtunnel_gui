@@ -80,6 +80,7 @@ badge-stopped = Stopped
 badge-hosting = Hosting…
 
 ## Top bar (redesign)
+app-title = Dev Tunnels
 pill-connected = Connected
 tooltip-settings = Toggle dark mode
 
