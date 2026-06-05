@@ -844,7 +844,7 @@ an inline QA prompt that takes the plan + diff range as input.
 | 2 | SDK host engine (connect/keep-alive/stop) | critical | extended | opus | `63f83e9` | green | stage-2-report.md |
 | 3 | Health probe engine (ureq, 3-state) | standard | standard | sonnet | `26261b8` | green | stage-3-report.md |
 | 4 | UI + main.rs wiring (toggle + badges) | judgment | extended | opus | `f365b7b` | green | stage-4-report.md |
-| 5 | HITL: empirical 502/503 + live end-to-end | critical | extended | — | _pending_ | **HITL — awaiting operator** | — |
+| 5 | HITL: empirical 502/503 + live end-to-end | critical | extended | opus | `45858c5` | green (validated live) | stage-5-report.md |
 
 Reviewer gate (light): **pass-with-notes** — all notes non-blocking; the broad `"tunnel"` relay
 marker in `probe.rs` is flagged for Stage 5 HITL tuning.
