@@ -1,0 +1,25 @@
+// Small chip for short metadata (expiration, protocol, login status).
+import { Theme } from "theme.slint";
+
+export component Pill inherits Rectangle {
+    in property <string> text;
+    // Accent variant for the primary metadata chip (e.g. "Connected").
+    in property <bool> accent: false;
+
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: root.accent ? Theme.accent : Theme.border;
+    border-radius: Theme.pill-height / 3;
+    height: Theme.pill-height;
+
+    HorizontalLayout {
+        padding-left: Theme.gap-sm * 1.5;
+        padding-right: Theme.gap-sm * 1.5;
+        Text {
+            text: root.text;
+            color: root.accent ? Theme.accent : Theme.muted;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+        }
+    }
+}

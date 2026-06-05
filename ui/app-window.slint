@@ -4,6 +4,7 @@ import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
 import { StatusDot } from "status-dot.slint";
+import { Pill } from "pill.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -16,26 +17,6 @@ export struct PortRow {
     expiration: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"  (see theme.slint)
     host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
-}
-
-// Small chip (protocol, expiration).
-component Pill inherits Rectangle {
-    in property <string> text;
-    background: Theme.surface;
-    border-width: 1px;
-    border-color: Theme.border;
-    border-radius: 6px;
-    height: 18px;
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        Text {
-            text: root.text;
-            color: Theme.muted;
-            font-size: Theme.fs-caption;
-            vertical-alignment: center;
-        }
-    }
 }
 
 export component AppWindow inherits Window {
