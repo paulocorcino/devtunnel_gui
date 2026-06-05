@@ -808,6 +808,17 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_btn_del_port(loc.t("btn-del-port").into());
     s.set_btn_del_group(loc.t("btn-del-group").into());
 
+    // Redesign: status-dot tooltips, top bar, row tooltips, toast, empty state
+    s.set_badge_stopped(loc.t("badge-stopped").into());
+    s.set_badge_hosting(loc.t("badge-hosting").into());
+    s.set_pill_connected(loc.t("pill-connected").into());
+    s.set_tooltip_settings(loc.t("tooltip-settings").into());
+    s.set_tooltip_copy(loc.t("tooltip-copy").into());
+    s.set_tooltip_open(loc.t("tooltip-open").into());
+    s.set_toast_copied(loc.t("toast-copied").into());
+    s.set_empty_title(loc.t("empty-title").into());
+    s.set_btn_create_group(loc.t("btn-create-group").into());
+
     // Dialogs — common
     s.set_btn_cancel(loc.t("btn-cancel").into());
     s.set_btn_create(loc.t("btn-create").into());
