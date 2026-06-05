@@ -1,0 +1,28 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# Slint
+*.slint.cache
+
+# Build / dist
+/dist/
+*.exe~
+
+# App runtime data (local config/cache lives in %APPDATA%, not the repo)
+*.log
+
+# OS
+Thumbs.db
+Desktop.ini
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+
+# Claude / agents scratch (issues are tracked under docs/backlogs/, not here)
+.scratch/
+.claude/
