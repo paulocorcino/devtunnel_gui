@@ -5,6 +5,8 @@ mod devtunnel;
 mod host;
 mod locale;
 mod model;
+#[cfg(feature = "hosting")]
+mod probe;
 
 slint::include_modules!();
 
