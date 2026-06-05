@@ -501,14 +501,18 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
+                // Tracks whether at least one *successful* load landed this tick;
+                // a failed first fetch must not consume the one-shot auto-resume.
+                let mut loaded_ok = false;
                 while let Ok((placeholder_id, result)) = rx.try_recv() {
+                    loaded_ok |= result.is_ok();
                     apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
                     loaded = true;
                 }
 
                 // On the first successful load, re-host any group that was active in
                 // the previous session and is still present in the fetched rows.
-                if loaded && !auto_resumed {
+                if loaded_ok && !auto_resumed {
                     auto_resumed = true;
                     let persisted: HashSet<String> = auto_host_ids_pump.borrow().clone();
                     if !persisted.is_empty() {
