@@ -62,6 +62,9 @@ struct LiveState {
     placeholders: Vec<Placeholder>,
     /// Monotonic counter for placeholder ids.
     next_placeholder_id: u64,
+    /// Optimistic hidden-delete keys for in-flight delete operations.
+    /// `(tunnel_id, None)` hides the whole group; `(tunnel_id, Some(port))` hides one port.
+    hidden: HashSet<(String, Option<i32>)>,
 }
 
 impl LiveState {
@@ -79,6 +82,16 @@ impl LiveState {
 
     fn remove_placeholder(&mut self, id: u64) {
         self.placeholders.retain(|p| p.id != id);
+    }
+
+    fn hide_delete(&mut self, tunnel_id: String, port: Option<i32>) -> (String, Option<i32>) {
+        let key = (tunnel_id, port);
+        self.hidden.insert(key.clone());
+        key
+    }
+
+    fn unhide_delete(&mut self, key: &(String, Option<i32>)) {
+        self.hidden.remove(key);
     }
 }
 
@@ -187,7 +200,11 @@ fn main() -> anyhow::Result<()> {
     // The UI thread (timer) applies the result to the window and rebuilds the
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
     // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
-    let (tx, rx) = std::sync::mpsc::channel::<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>();
+    let (tx, rx) = std::sync::mpsc::channel::<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>();
 
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
@@ -254,6 +271,7 @@ fn main() -> anyhow::Result<()> {
                     "status-creating-group",
                     &loc,
                     Some(placeholder_id),
+                    None,
                     move |loc| devtunnel::create_group(&opts, loc).map(|_| ()),
                 );
             },
@@ -313,6 +331,7 @@ fn main() -> anyhow::Result<()> {
                     "status-adding-port",
                     &loc,
                     Some(placeholder_id),
+                    None,
                     move |loc| {
                         let tunnel_id = if group_id.is_empty() {
                             devtunnel::create_group(
@@ -381,18 +400,26 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         let loc = loc.clone();
         let pending = pending.clone();
+        let state = state.clone();
+        let tray = tray.clone();
+        let actions = actions.clone();
         app.on_confirm_accept(move || {
             let Some(p) = pending.borrow_mut().take() else {
                 return;
             };
             let tunnel_id = p.tunnel_id;
             let port = p.port;
+            let hidden_key = state.borrow_mut().hide_delete(tunnel_id.clone(), port);
+            if let Some(a) = weak.upgrade() {
+                rebuild_rows(&a, &tray, &actions, &state, &loc);
+            }
             run_op_async(
                 &weak,
                 &tx,
                 "status-deleting",
                 &loc,
                 None,
+                Some(hidden_key),
                 move |loc| match port {
                     Some(pn) => devtunnel::delete_port(&tunnel_id, pn, loc),
                     None => devtunnel::delete_group(&tunnel_id, loc),
@@ -480,8 +507,17 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
-                while let Ok((placeholder_id, result)) = rx.try_recv() {
-                    apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
+                while let Ok((placeholder_id, hidden_key, result)) = rx.try_recv() {
+                    apply_rows(
+                        &weak,
+                        &tray,
+                        &actions,
+                        &state,
+                        placeholder_id,
+                        hidden_key,
+                        result,
+                        &loc,
+                    );
                     loaded = true;
                 }
 
@@ -604,7 +640,11 @@ fn open_browser(url: &str) {
 /// Fires the fetch on a background thread; the result comes back via `Sender`.
 fn load_async(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
+    tx: &Sender<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>,
     loc: &Rc<Locale>,
 ) {
     if let Some(a) = weak.upgrade() {
@@ -614,7 +654,7 @@ fn load_async(
     let lang = locale::system_locale();
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
-        let _ = tx.send((None, devtunnel::fetch_rows(&loc)));
+        let _ = tx.send((None, None, devtunnel::fetch_rows(&loc)));
     });
 }
 
@@ -622,12 +662,18 @@ fn load_async(
 /// The op's success feeds straight into `fetch_rows`, so the same `apply_rows`
 /// path reconciles the UI (and tray) from the service after every mutation.
 /// `placeholder` is the id of an optimistic placeholder row to remove when done.
+/// `hidden_key` is the hidden-delete key to clear when the op settles.
 fn run_op_async<F>(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
+    tx: &Sender<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>,
     status_key: &str,
     loc: &Rc<Locale>,
     placeholder: Option<u64>,
+    hidden_key: Option<(String, Option<i32>)>,
     op: F,
 ) where
     F: FnOnce(&Locale) -> anyhow::Result<()> + Send + 'static,
@@ -640,7 +686,7 @@ fn run_op_async<F>(
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
         let result = op(&loc).and_then(|()| devtunnel::fetch_rows(&loc));
-        let _ = tx.send((placeholder, result));
+        let _ = tx.send((placeholder, hidden_key, result));
     });
 }
 
@@ -652,6 +698,7 @@ fn apply_rows(
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
     state: &Rc<RefCell<LiveState>>,
     placeholder_id: Option<u64>,
+    hidden_key: Option<(String, Option<i32>)>,
     result: anyhow::Result<Vec<devtunnel::Row>>,
     loc: &Rc<Locale>,
 ) {
@@ -660,6 +707,11 @@ fn apply_rows(
     // Remove the optimistic placeholder whether the op succeeded or failed.
     if let Some(id) = placeholder_id {
         state.borrow_mut().remove_placeholder(id);
+    }
+
+    // Clear the hidden-delete key on both success and error so the row is restored on failure.
+    if let Some(ref key) = hidden_key {
+        state.borrow_mut().unhide_delete(key);
     }
 
     match result {
@@ -692,7 +744,7 @@ fn apply_rows(
             app.set_status(loc.t_args("status-port-count", &args).into());
         }
         Err(e) => {
-            // Rebuild so that the removed placeholder is no longer shown.
+            // Rebuild so that the removed placeholder / restored hidden row is reflected.
             rebuild_rows(&app, tray, actions, state, loc);
             let mut args = FluentArgs::new();
             args.set("message", e.to_string());
@@ -715,6 +767,10 @@ fn rebuild_rows(
     let mut model: Vec<PortRow> = st
         .rows
         .iter()
+        .filter(|r| {
+            !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+        })
         .map(|r| PortRow {
             group: r.group.clone().into(),
             tunnel_id: r.tunnel_id.clone().into(),
@@ -891,6 +947,78 @@ mod tests {
         // After removal the placeholder list is empty again.
         st.remove_placeholder(id);
         assert!(st.placeholders.is_empty());
+    }
+
+    fn make_row(tunnel_id: &str, port: i32) -> devtunnel::Row {
+        devtunnel::Row {
+            group: tunnel_id.to_string(),
+            tunnel_id: tunnel_id.to_string(),
+            port,
+            protocol: "http".into(),
+            url: "https://example.com".into(),
+            expiration: "30d".into(),
+        }
+    }
+
+    #[test]
+    fn hidden_delete_insert_remove() {
+        let mut st = make_state();
+
+        let key1 = st.hide_delete("tid1".into(), Some(3000));
+        let key2 = st.hide_delete("tid2".into(), None);
+        assert_eq!(st.hidden.len(), 2);
+        assert!(st.hidden.contains(&("tid1".to_string(), Some(3000))));
+        assert!(st.hidden.contains(&("tid2".to_string(), None)));
+
+        st.unhide_delete(&key1);
+        assert_eq!(st.hidden.len(), 1);
+        assert!(!st.hidden.contains(&("tid1".to_string(), Some(3000))));
+
+        st.unhide_delete(&key2);
+        assert!(st.hidden.is_empty());
+    }
+
+    #[test]
+    fn hidden_port_excludes_matching_row() {
+        let mut st = make_state();
+        st.rows.push(make_row("tid1", 3000));
+        st.rows.push(make_row("tid1", 8080));
+
+        // Hide the port-3000 row; port-8080 should still be visible.
+        st.hide_delete("tid1".into(), Some(3000));
+
+        let visible: Vec<_> = st
+            .rows
+            .iter()
+            .filter(|r| {
+                !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                    && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+            })
+            .collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].port, 8080);
+    }
+
+    #[test]
+    fn hidden_group_excludes_all_ports() {
+        let mut st = make_state();
+        st.rows.push(make_row("tid1", 3000));
+        st.rows.push(make_row("tid1", 8080));
+        st.rows.push(make_row("tid2", 9000));
+
+        // Hide the entire group tid1; tid2's row should remain.
+        st.hide_delete("tid1".into(), None);
+
+        let visible: Vec<_> = st
+            .rows
+            .iter()
+            .filter(|r| {
+                !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                    && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+            })
+            .collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].tunnel_id, "tid2");
     }
 }
 
