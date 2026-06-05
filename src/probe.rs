@@ -96,7 +96,11 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
         .name("probe-engine".into())
         .spawn(move || {
             let mut targets: Vec<ProbeTarget> = Vec::new();
+            // Steady-state interval when all targets are healthy (overridable via SetInterval).
             let mut interval = Duration::from_secs(60);
+            // Fast interval used while any target is not yet Operational, so a
+            // recovering / warming-up service is reflected within a few seconds.
+            const FAST_INTERVAL: Duration = Duration::from_secs(3);
 
             // Build a reusable ureq agent with a 5 s connect+read timeout.
             let agent = ureq::AgentBuilder::new()
@@ -121,6 +125,7 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
 
                 // Probe every target. Only the status code matters for the 3-state
                 // classification, so the response body is not downloaded.
+                let mut all_operational = true;
                 for target in &targets {
                     let status = match agent.get(&target.url).call() {
                         Ok(resp) => Some(resp.status()),
@@ -129,6 +134,9 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
                     };
 
                     let state = classify(status);
+                    if state != ProbeState::Operational {
+                        all_operational = false;
+                    }
                     let _ = events.send(ProbeEvent::Status {
                         tunnel_id: target.tunnel_id.clone(),
                         port: target.port,
@@ -136,12 +144,21 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
                     });
                 }
 
-                // Sleep for the configured interval, checking for commands every second
-                // so the thread stays responsive to SetInterval / SetTargets updates.
-                // A SetTargets update breaks the sleep early so the new targets are
-                // probed immediately (otherwise a freshly-hosted group would show no
-                // health badge for up to `interval` seconds).
-                let steps = interval.as_secs().max(1);
+                // Adaptive cadence: while every target is healthy, poll at the slow
+                // configured `interval` (low resource use). While anything is not yet
+                // Operational (a freshly-hosted group still warming up, or a service
+                // that's down/recovering), poll at a fast interval so the badge flips
+                // within a few seconds instead of waiting up to `interval`.
+                let wait = if targets.is_empty() || all_operational {
+                    interval
+                } else {
+                    FAST_INTERVAL
+                };
+
+                // Sleep `wait`, checking commands every second so the thread stays
+                // responsive. A SetTargets update breaks the sleep early so new
+                // targets are probed immediately.
+                let steps = wait.as_secs().max(1);
                 for _ in 0..steps {
                     thread::sleep(Duration::from_secs(1));
                     match cmd_rx.try_recv() {
