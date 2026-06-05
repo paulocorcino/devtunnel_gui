@@ -38,6 +38,81 @@ struct PendingDelete {
     port: Option<i32>,
 }
 
+/// UI-thread state derived from host/probe events. Persists across reloads so a
+/// fresh `fetch_rows` keeps the latest health/host status per row.
+#[derive(Default)]
+struct LiveState {
+    /// Latest data load (Real Tunnel ID order preserved), used to rebuild rows
+    /// when a host/probe event changes derived status without a refetch.
+    rows: Vec<devtunnel::Row>,
+    /// Per-port health status id ("ok"/"warn"/"down"), keyed by (tunnel_id, port).
+    probe: HashMap<(String, i32), String>,
+    /// Per-group host state id ("host"/"hosting"/"" ...), keyed by tunnel_id.
+    host: HashMap<String, String>,
+}
+
+/// Derives a row's `status` id from the latest probe + host state.
+/// Probe result wins (it is the most specific); otherwise fall back to the
+/// group's host state ("host" = hosting but not yet probed) or "idle".
+fn derive_status(state: &LiveState, tunnel_id: &str, port: i32) -> String {
+    if let Some(s) = state.probe.get(&(tunnel_id.to_string(), port)) {
+        return s.clone();
+    }
+    match state.host.get(tunnel_id).map(String::as_str) {
+        Some("hosting") | Some("host") => "host".to_string(),
+        _ => "idle".to_string(),
+    }
+}
+
+/// Maps a [`host::HostState`] to the stored host-state id, or `None` when the
+/// group is no longer hosted (Stopped / Idle / Error -> clear).
+fn map_host_state(hs: &host::HostState) -> Option<&'static str> {
+    match hs {
+        host::HostState::Connecting | host::HostState::Reconnecting => Some("host"),
+        host::HostState::Hosting => Some("hosting"),
+        host::HostState::Idle | host::HostState::Stopped | host::HostState::Error(_) => None,
+    }
+}
+
+/// Maps a [`probe::ProbeState`] to the existing status id used by the UI/theme.
+#[cfg(feature = "hosting")]
+fn map_probe_state(ps: &probe::ProbeState) -> &'static str {
+    match ps {
+        probe::ProbeState::Operational => "ok",
+        probe::ProbeState::ServiceDown => "warn",
+        probe::ProbeState::Down => "down",
+    }
+}
+
+/// Builds probe targets for every port of a currently-hosting group that has a URL.
+#[cfg(feature = "hosting")]
+fn hosting_targets(state: &LiveState) -> Vec<probe::ProbeTarget> {
+    state
+        .rows
+        .iter()
+        .filter(|r| !r.url.is_empty())
+        .filter(|r| {
+            matches!(
+                state.host.get(&r.tunnel_id).map(String::as_str),
+                Some("hosting")
+            )
+        })
+        .map(|r| probe::ProbeTarget {
+            tunnel_id: r.tunnel_id.clone(),
+            port: r.port,
+            url: r.url.clone(),
+        })
+        .collect()
+}
+
+/// The group toggle label state ("hosting" when the group is being hosted).
+fn derive_host_state(state: &LiveState, tunnel_id: &str) -> String {
+    match state.host.get(tunnel_id).map(String::as_str) {
+        Some("hosting") | Some("host") => "hosting".to_string(),
+        _ => String::new(),
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     let app = AppWindow::new()?;
 
@@ -73,6 +148,27 @@ fn main() -> anyhow::Result<()> {
     // The UI thread (timer) applies the result to the window and rebuilds the
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
     let (tx, rx) = std::sync::mpsc::channel::<anyhow::Result<Vec<devtunnel::Row>>>();
+
+    // Derived live state (probe/host status per row), shared on the UI thread.
+    let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
+
+    // ---- Host + probe engines ----
+    // The host engine starts in every build (it is a no-op without `hosting`);
+    // the probe engine only exists in the `hosting` build. Both communicate with
+    // the UI thread via mpsc channels drained in the Timer pump below.
+    let (host_evt_tx, host_evt_rx) = std::sync::mpsc::channel::<host::HostEvent>();
+    let tunnel_host = host::spawn(host_evt_tx);
+
+    #[cfg(feature = "hosting")]
+    let (probe_evt_rx, probe_cmd_tx) = {
+        let (probe_evt_tx, probe_evt_rx) = std::sync::mpsc::channel::<probe::ProbeEvent>();
+        let probe_cmd_tx = probe::spawn(probe_evt_tx);
+        (probe_evt_rx, probe_cmd_tx)
+    };
+
+    // The default (non-hosting) build shows the toggle disabled.
+    #[cfg(feature = "hosting")]
+    app.set_hosting_enabled(true);
 
     // ---- UI callbacks ----
     app.on_copy_url(|url| copy(&url));
@@ -212,6 +308,51 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- Host / Stop toggle ----
+    // Forward the command to the engine and optimistically reflect the group's
+    // host state in the UI; the engine confirms via HostEvent in the pump.
+    let tunnel_host = Rc::new(tunnel_host);
+    {
+        let host = tunnel_host.clone();
+        let state = state.clone();
+        let weak = app.as_weak();
+        let tray = tray.clone();
+        let actions = actions.clone();
+        let loc = loc.clone();
+        app.on_host(move |tunnel_id| {
+            let id = tunnel_id.to_string();
+            host.send(host::HostCommand::Host {
+                tunnel_id: id.clone(),
+            });
+            state.borrow_mut().host.insert(id, "host".to_string());
+            if let Some(a) = weak.upgrade() {
+                rebuild_rows(&a, &tray, &actions, &state, &loc);
+            }
+        });
+    }
+    {
+        let host = tunnel_host.clone();
+        let state = state.clone();
+        let weak = app.as_weak();
+        let tray = tray.clone();
+        let actions = actions.clone();
+        let loc = loc.clone();
+        app.on_stop(move |tunnel_id| {
+            let id = tunnel_id.to_string();
+            host.send(host::HostCommand::Stop {
+                tunnel_id: id.clone(),
+            });
+            let mut st = state.borrow_mut();
+            st.host.remove(&id);
+            // Drop probe results for this group's ports so badges clear.
+            st.probe.retain(|(tid, _), _| tid != &id);
+            drop(st);
+            if let Some(a) = weak.upgrade() {
+                rebuild_rows(&a, &tray, &actions, &state, &loc);
+            }
+        });
+    }
+
     // ---- Pump events (tray + load results) into the Slint loop via Timer ----
     let menu_rx = MenuEvent::receiver();
     let tray_rx = TrayIconEvent::receiver();
@@ -221,6 +362,7 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let state = state.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -244,8 +386,68 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
                 // Load result: apply to UI and rebuild tray menu.
+                let mut loaded = false;
                 while let Ok(result) = rx.try_recv() {
-                    apply_rows(&weak, &tray, &actions, result, &loc);
+                    apply_rows(&weak, &tray, &actions, &state, result, &loc);
+                    loaded = true;
+                }
+
+                // Host engine state changes -> update per-group host state.
+                let mut host_changed = false;
+                while let Ok(host::HostEvent::State {
+                    tunnel_id,
+                    state: hs,
+                }) = host_evt_rx.try_recv()
+                {
+                    let id = map_host_state(&hs);
+                    let mut st = state.borrow_mut();
+                    match id {
+                        Some(v) => {
+                            st.host.insert(tunnel_id, v.to_string());
+                        }
+                        None => {
+                            // Stopped / Idle / Error: clear host + probe for the group.
+                            st.host.remove(&tunnel_id);
+                            st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                        }
+                    }
+                    host_changed = true;
+                }
+
+                // Probe results -> update per-port health status.
+                #[cfg(feature = "hosting")]
+                let mut probe_changed = false;
+                #[cfg(feature = "hosting")]
+                while let Ok(probe::ProbeEvent::Status {
+                    tunnel_id,
+                    port,
+                    state: ps,
+                }) = probe_evt_rx.try_recv()
+                {
+                    state
+                        .borrow_mut()
+                        .probe
+                        .insert((tunnel_id, port), map_probe_state(&ps).to_string());
+                    probe_changed = true;
+                }
+
+                // Re-point the probe at the currently-hosting groups' URLs whenever
+                // the load or host state changed.
+                #[cfg(feature = "hosting")]
+                if loaded || host_changed {
+                    let targets = hosting_targets(&state.borrow());
+                    let _ = probe_cmd_tx.send(probe::ProbeCommand::SetTargets(targets));
+                }
+
+                // Rebuild the visible rows if any derived state changed.
+                #[cfg(feature = "hosting")]
+                let derived_changed = host_changed || probe_changed;
+                #[cfg(not(feature = "hosting"))]
+                let derived_changed = host_changed;
+                if derived_changed && !loaded {
+                    if let Some(a) = weak.upgrade() {
+                        rebuild_rows(&a, &tray, &actions, &state, &loc);
+                    }
                 }
             },
         );
@@ -340,6 +542,7 @@ fn apply_rows(
     weak: &slint::Weak<AppWindow>,
     tray: &tray_icon::TrayIcon,
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
+    state: &Rc<RefCell<LiveState>>,
     result: anyhow::Result<Vec<devtunnel::Row>>,
     loc: &Rc<Locale>,
 ) {
@@ -364,25 +567,11 @@ fn apply_rows(
             app.set_group_names(ModelRc::new(VecModel::from(group_names)));
             app.set_group_ids(ModelRc::new(VecModel::from(group_ids)));
 
-            let model: Vec<PortRow> = rows
-                .into_iter()
-                .map(|r| PortRow {
-                    group: r.group.into(),
-                    tunnel_id: r.tunnel_id.into(),
-                    port: r.port,
-                    protocol: r.protocol.into(),
-                    url: r.url.into(),
-                    expiration: r.expiration.into(),
-                    // Real status comes in slice #4 (health probe). For now: idle.
-                    status: "idle".into(),
-                })
-                .collect();
+            // Cache the load and rebuild the row model (status/host-state derived
+            // from the latest probe/host events), then refresh probe targets.
+            state.borrow_mut().rows = rows;
+            rebuild_rows(&app, tray, actions, state, loc);
 
-            // Rebuild the tray menu with per-port actions from the same data.
-            let menu = build_tray_menu(&model, &mut actions.borrow_mut(), loc);
-            tray.set_menu(Some(Box::new(menu)));
-
-            app.set_rows(ModelRc::new(VecModel::from(model)));
             let mut args = FluentArgs::new();
             args.set("count", count as i64);
             app.set_status(loc.t_args("status-port-count", &args).into());
@@ -393,6 +582,39 @@ fn apply_rows(
             app.set_status(loc.t_args("status-error", &args).into());
         }
     }
+}
+
+/// Rebuilds the Slint row model and tray menu from the cached load, deriving each
+/// row's `status` and `host-state` from the latest probe/host events. Runs on the
+/// UI thread (after a load, or when a host/probe event updates derived state).
+fn rebuild_rows(
+    app: &AppWindow,
+    tray: &tray_icon::TrayIcon,
+    actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
+    state: &Rc<RefCell<LiveState>>,
+    loc: &Rc<Locale>,
+) {
+    let st = state.borrow();
+    let model: Vec<PortRow> = st
+        .rows
+        .iter()
+        .map(|r| PortRow {
+            group: r.group.clone().into(),
+            tunnel_id: r.tunnel_id.clone().into(),
+            port: r.port,
+            protocol: r.protocol.clone().into(),
+            url: r.url.clone().into(),
+            expiration: r.expiration.clone().into(),
+            status: derive_status(&st, &r.tunnel_id, r.port).into(),
+            host_state: derive_host_state(&st, &r.tunnel_id).into(),
+        })
+        .collect();
+
+    // Rebuild the tray menu with per-port actions from the same data.
+    let menu = build_tray_menu(&model, &mut actions.borrow_mut(), loc);
+    tray.set_menu(Some(Box::new(menu)));
+
+    app.set_rows(ModelRc::new(VecModel::from(model)));
 }
 
 /// Builds the tray menu: "Open window", one submenu per port with URL actions
@@ -441,6 +663,15 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_expires_label(loc.t("expires-label").into());
     s.set_btn_copy(loc.t("btn-copy").into());
     s.set_btn_open(loc.t("btn-open").into());
+
+    // Hosting + health badges
+    s.set_btn_host(loc.t("btn-host").into());
+    s.set_btn_stop(loc.t("btn-stop").into());
+    s.set_status_hosting(loc.t("status-hosting").into());
+    s.set_status_stopped(loc.t("status-stopped").into());
+    s.set_badge_operational(loc.t("badge-operational").into());
+    s.set_badge_service_down(loc.t("badge-service-down").into());
+    s.set_badge_down(loc.t("badge-down").into());
     s.set_btn_del_port(loc.t("btn-del-port").into());
     s.set_btn_del_group(loc.t("btn-del-group").into());
 

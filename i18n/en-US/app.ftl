@@ -63,6 +63,17 @@ expires-label = expires
 btn-copy = Copy
 btn-open = Open
 
+## Hosting
+btn-host = Host
+btn-stop = Stop
+status-hosting = hosting…
+status-stopped = stopped
+
+## Health badges
+badge-operational = Operational
+badge-service-down = Service down
+badge-down = Down
+
 ## Tray menu
 menu-open-window = Open window
 menu-copy-url = Copy URL

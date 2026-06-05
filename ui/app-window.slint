@@ -14,6 +14,7 @@ export struct PortRow {
     url: string,
     expiration: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host"  (see theme.slint)
+    host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
 }
 
 // Status dot colored by state.
@@ -64,7 +65,13 @@ export component AppWindow inherits Window {
     in-out property <bool> show-add-port;
     in-out property <bool> show-confirm;
 
+    // True only in the `hosting` build; gates the per-group Host/Stop toggle.
+    in property <bool> hosting-enabled: false;
+
     callback refresh();
+    // Start / stop hosting a group (by Real Tunnel ID).
+    callback host(string /*tunnel-id*/);
+    callback stop(string /*tunnel-id*/);
     callback copy-url(string);
     callback open-url(string);
     callback create-group(string /*name*/, string /*expiration*/, bool /*anonymous*/,
@@ -132,10 +139,25 @@ export component AppWindow inherits Window {
                     padding-right: Theme.pad;
                     spacing: 10px;
 
-                    // status
+                    // status dot + health badge
                     VerticalLayout {
                         alignment: center;
-                        StatusDot { status: row.status; }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            VerticalLayout {
+                                alignment: center;
+                                StatusDot { status: row.status; }
+                            }
+                            // Localized badge label for the 3 health states; hidden when idle/host.
+                            if row.status == "ok" || row.status == "warn" || row.status == "down" :
+                            Pill {
+                                text: row.status == "ok"
+                                    ? Strings.badge-operational
+                                    : (row.status == "warn"
+                                        ? Strings.badge-service-down
+                                        : Strings.badge-down);
+                            }
+                        }
                     }
 
                     // port + url + meta
@@ -176,6 +198,20 @@ export component AppWindow inherits Window {
                         alignment: center;
                         HorizontalLayout {
                             spacing: 6px;
+                            // Per-group Host/Stop toggle. Disabled in the default
+                            // (non-hosting) build; label reflects the group state.
+                            TxtButton {
+                                text: row.host-state == "hosting" ? Strings.btn-stop : Strings.btn-host;
+                                primary: row.host-state != "hosting";
+                                enabled: root.hosting-enabled;
+                                clicked => {
+                                    if (row.host-state == "hosting") {
+                                        root.stop(row.tunnel-id);
+                                    } else {
+                                        root.host(row.tunnel-id);
+                                    }
+                                }
+                            }
                             TxtButton {
                                 text: Strings.btn-copy;
                                 enabled: row.url != "";
