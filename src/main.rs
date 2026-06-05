@@ -7,6 +7,7 @@ mod locale;
 mod model;
 #[cfg(feature = "hosting")]
 mod probe;
+mod state;
 
 slint::include_modules!();
 
