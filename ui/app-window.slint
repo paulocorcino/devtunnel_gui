@@ -1,0 +1,97 @@
+import { Button, ListView, VerticalBox, HorizontalBox } from "std-widgets.slint";
+
+// Uma linha = uma porta de um grupo (túnel), com sua Public URL.
+export struct PortRow {
+    group: string,
+    port: int,
+    protocol: string,
+    url: string,
+    expiration: string,
+}
+
+export component AppWindow inherits Window {
+    title: "DevTunnel GUI";
+    preferred-width: 780px;
+    preferred-height: 500px;
+    min-width: 520px;
+    min-height: 320px;
+
+    in property <[PortRow]> rows;
+    in property <string> status: "carregando…";
+
+    callback refresh();
+    callback copy-url(string);
+    callback open-url(string);
+
+    VerticalBox {
+        padding: 12px;
+        spacing: 8px;
+
+        HorizontalBox {
+            spacing: 8px;
+            Text {
+                text: "Dev Tunnels";
+                font-size: 18px;
+                font-weight: 700;
+                vertical-alignment: center;
+            }
+            Rectangle { horizontal-stretch: 1; }
+            Text {
+                text: root.status;
+                color: gray;
+                vertical-alignment: center;
+            }
+            Button {
+                text: "Atualizar";
+                clicked => { root.refresh(); }
+            }
+        }
+
+        ListView {
+            for row in root.rows : Rectangle {
+                height: 64px;
+                touch := TouchArea { }
+                background: touch.has-hover ? #f3f4f6 : transparent;
+                border-radius: 6px;
+
+                HorizontalBox {
+                    padding-left: 10px;
+                    padding-right: 10px;
+                    spacing: 8px;
+
+                    VerticalBox {
+                        spacing: 2px;
+                        alignment: center;
+                        Text {
+                            text: row.group;
+                            font-size: 13px;
+                            font-weight: 600;
+                        }
+                        Text {
+                            text: "porta \{row.port} · \{row.protocol} · expira: \{row.expiration}";
+                            color: gray;
+                            font-size: 11px;
+                        }
+                        Text {
+                            text: row.url == "" ? "(sem URL — porta não configurada)" : row.url;
+                            color: row.url == "" ? gray : #0a7c4a;
+                            font-size: 11px;
+                            overflow: elide;
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    Button {
+                        text: "Copiar";
+                        enabled: row.url != "";
+                        clicked => { root.copy-url(row.url); }
+                    }
+                    Button {
+                        text: "Abrir";
+                        enabled: row.url != "";
+                        clicked => { root.open-url(row.url); }
+                    }
+                }
+            }
+        }
+    }
+}
