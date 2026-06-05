@@ -1,0 +1,144 @@
+// Surface card for one group (tunnel): header (name, expiration pill,
+// Host toggle, de-emphasised delete) over a list of PortRows.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { Pill } from "pill.slint";
+import { Toggle } from "toggle.slint";
+import { IconButton } from "icon-button.slint";
+import { PortRow, PortView } from "port-row.slint";
+export { PortView }
+
+// One group (tunnel) with its ports, as shown in the main list.
+export struct GroupView {
+    group: string,        // friendly name (falls back to tunnel-id)
+    tunnel-id: string,    // Real Tunnel ID (stable service key); empty for placeholders
+    expiration: string,
+    hosting: bool,        // the group is being hosted (drives the Host toggle)
+    provisioning: bool,   // optimistic placeholder for an in-flight create — inert
+    has-port: bool,       // at least one real port (gates Host)
+    ports: [PortView],
+}
+
+export component GroupCard inherits Rectangle {
+    in property <GroupView> gv;
+    // True only in the `hosting` build; gates the Host/Stop toggle.
+    in property <bool> hosting-enabled: false;
+    callback host();
+    callback stop();
+    callback copy-url(string);
+    callback open-url(string);
+    callback delete-port(int /*port*/);
+    callback delete-group();
+
+    height: layout.preferred-height;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+
+    header-hover := TouchArea { }
+
+    layout := VerticalLayout {
+        padding-bottom: Theme.gap-sm;
+
+        // ---- Header ----
+        Rectangle {
+            height: Theme.card-header-height;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                spacing: Theme.gap;
+
+                Text {
+                    text: gv.group;
+                    color: Theme.text;
+                    font-size: Theme.fs-section;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    // Placeholders show the provisioning badge instead of expiration.
+                    if gv.provisioning || gv.expiration != "" : Pill {
+                        text: gv.provisioning
+                            ? Strings.badge-provisioning
+                            : "\{Strings.expires-label} \{gv.expiration}";
+                        accent: gv.provisioning;
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Text {
+                    text: gv.hosting ? Strings.btn-stop : Strings.btn-host;
+                    color: Theme.muted;
+                    font-size: Theme.fs-caption;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        checked: gv.hosting;
+                        // Hosting a portless group forwards nothing, so only enable
+                        // Host when the group has a port (or to Stop an already-
+                        // hosting group). Placeholders are inert.
+                        enabled: root.hosting-enabled && !gv.provisioning && (gv.has-port || gv.hosting);
+                        toggled(on) => {
+                            if (on) {
+                                root.host();
+                            } else {
+                                root.stop();
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        glyph: "✕";
+                        tip: Strings.btn-del-group;
+                        revealed: header-hover.has-hover;
+                        danger: true;
+                        enabled: !gv.provisioning;
+                        clicked => {
+                            root.delete-group();
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        // ---- Ports ----
+        for p in gv.ports : PortRow {
+            pv: p;
+            copy-url(url) => {
+                root.copy-url(url);
+            }
+            open-url(url) => {
+                root.open-url(url);
+            }
+            delete-port(port) => {
+                root.delete-port(port);
+            }
+        }
+        // A group with no ports yet (port not configured).
+        if gv.ports.length == 0 && !gv.provisioning : Rectangle {
+            height: Theme.row-height;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                Text {
+                    text: Strings.no-url;
+                    color: Theme.muted;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}
