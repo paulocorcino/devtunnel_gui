@@ -75,6 +75,20 @@ badge-service-down = Service down
 badge-down = Down
 badge-provisioning = Provisioning…
 
+## Settings
+btn-settings = Settings
+settings-title = Settings
+field-auto-start = Start with Windows
+field-probe-interval = Probe interval (seconds)
+btn-close = Close
+
+## Re-login (expired CLI sign-in)
+relogin-message = Sign-in expired — sign in again to keep hosting
+btn-sign-in = Sign in
+status-signing-in = signing in…
+toast-relogin-title = DevTunnel GUI — sign-in required
+toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
+
 ## Tray menu
 menu-open-window = Open window
 menu-copy-url = Copy URL

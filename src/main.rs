@@ -868,6 +868,17 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_protocol(loc.t("field-protocol").into());
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
+
+    // Settings
+    s.set_btn_settings(loc.t("btn-settings").into());
+    s.set_settings_title(loc.t("settings-title").into());
+    s.set_field_auto_start(loc.t("field-auto-start").into());
+    s.set_field_probe_interval(loc.t("field-probe-interval").into());
+    s.set_btn_close(loc.t("btn-close").into());
+
+    // Re-login
+    s.set_relogin_message(loc.t("relogin-message").into());
+    s.set_btn_sign_in(loc.t("btn-sign-in").into());
 }
 
 #[cfg(test)]
