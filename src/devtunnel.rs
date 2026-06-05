@@ -26,6 +26,163 @@ fn bin() -> String {
     std::env::var("DEVTUNNEL_BIN").unwrap_or_else(|_| "devtunnel".to_string())
 }
 
+/// Options for creating a group (tunnel). Mirrors the minimal + advanced fields
+/// of the "New group" dialog.
+pub struct CreateGroupOpts {
+    /// Friendly group name. Sanitized to a valid Tunnel ID before use.
+    pub name: String,
+    /// Expiration string accepted by the CLI (e.g. `30d`, `12h`). Empty = CLI default.
+    pub expiration: String,
+    /// Apply an anonymous-access ACE so the Public URLs are reachable without login.
+    pub anonymous: bool,
+    pub description: String,
+    /// Advanced: keep the original Host/Origin headers (`--host-header/--origin-header unchanged`).
+    pub keep_headers: bool,
+    /// Advanced: web request timeout in seconds (0 = disabled). Empty = CLI default.
+    pub request_timeout: String,
+}
+
+/// Options for adding a port to an existing group (tunnel).
+pub struct CreatePortOpts {
+    pub port: i32,
+    /// `http`, `https`, or `auto`.
+    pub protocol: String,
+    pub description: String,
+    pub keep_headers: bool,
+    pub request_timeout: String,
+}
+
+/// Sanitizes a free-form group name into a valid Dev Tunnel ID: lowercase ASCII
+/// alphanumerics and single hyphens, no leading/trailing hyphen. Spaces and
+/// underscores collapse to a single hyphen; other characters are dropped.
+/// The service still validates length and format — invalid results surface as a CLI error.
+pub fn sanitize_tunnel_id(name: &str) -> String {
+    let mut out = String::new();
+    let mut prev_hyphen = false;
+    for c in name.trim().chars() {
+        let lc = c.to_ascii_lowercase();
+        if lc.is_ascii_alphanumeric() {
+            out.push(lc);
+            prev_hyphen = false;
+        } else if matches!(lc, '-' | ' ' | '_') && !out.is_empty() && !prev_hyphen {
+            out.push('-');
+            prev_hyphen = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// Runs a mutating CLI command, checking only the exit status (output ignored).
+/// Used for operations whose JSON payload the UI does not consume.
+fn run_ok(args: &[&str], loc: &Locale) -> Result<()> {
+    let joined = args.join(" ");
+    let output = Command::new(bin())
+        .args(args)
+        .output()
+        .with_context(|| {
+            let mut a = FluentArgs::new();
+            a.set("args", joined.clone());
+            loc.t_args("err-cli-not-found", &a)
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let mut a = FluentArgs::new();
+        a.set("args", joined.clone());
+        a.set("stderr", stderr.trim().to_string());
+        return Err(anyhow!("{}", loc.t_args("err-cli-failed", &a)));
+    }
+    Ok(())
+}
+
+/// Creates a group (tunnel) and returns its Real Tunnel ID. Applies an anonymous
+/// ACE in the same call when requested. The subsequent list refresh reconciles the UI.
+pub fn create_group(opts: &CreateGroupOpts, loc: &Locale) -> Result<String> {
+    let id = sanitize_tunnel_id(&opts.name);
+    if id.is_empty() {
+        return Err(anyhow!("{}", loc.t("err-empty-group-name")));
+    }
+
+    let mut args: Vec<String> = vec!["create".into(), id.clone()];
+    if opts.anonymous {
+        args.push("-a".into());
+    }
+    if !opts.expiration.trim().is_empty() {
+        args.push("-e".into());
+        args.push(opts.expiration.trim().into());
+    }
+    if !opts.description.trim().is_empty() {
+        args.push("-d".into());
+        args.push(opts.description.trim().into());
+    }
+    if opts.keep_headers {
+        args.push("--host-header".into());
+        args.push("unchanged".into());
+        args.push("--origin-header".into());
+        args.push("unchanged".into());
+    }
+    if !opts.request_timeout.trim().is_empty() {
+        args.push("--request-timeout".into());
+        args.push(opts.request_timeout.trim().into());
+    }
+    args.push("-j".into());
+
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    let created: ShowResult = run_json(&argv, loc)?;
+    Ok(created.tunnel.tunnel_id)
+}
+
+/// Adds a port to an existing group (tunnel).
+pub fn create_port(tunnel_id: &str, opts: &CreatePortOpts, loc: &Locale) -> Result<()> {
+    if !(1..=65535).contains(&opts.port) {
+        return Err(anyhow!("{}", loc.t("err-invalid-port")));
+    }
+    let port = opts.port.to_string();
+    let mut args: Vec<String> = vec![
+        "port".into(),
+        "create".into(),
+        tunnel_id.into(),
+        "-p".into(),
+        port,
+    ];
+    if !opts.protocol.trim().is_empty() {
+        args.push("--protocol".into());
+        args.push(opts.protocol.trim().into());
+    }
+    if !opts.description.trim().is_empty() {
+        args.push("-d".into());
+        args.push(opts.description.trim().into());
+    }
+    if opts.keep_headers {
+        args.push("--host-header".into());
+        args.push("unchanged".into());
+        args.push("--origin-header".into());
+        args.push("unchanged".into());
+    }
+    if !opts.request_timeout.trim().is_empty() {
+        args.push("--request-timeout".into());
+        args.push(opts.request_timeout.trim().into());
+    }
+    args.push("-j".into());
+
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_ok(&argv, loc)
+}
+
+/// Deletes an entire group (tunnel) and all of its ports.
+pub fn delete_group(tunnel_id: &str, loc: &Locale) -> Result<()> {
+    run_ok(&["delete", tunnel_id, "-f", "-j"], loc)
+}
+
+/// Deletes a single port from a group, leaving the others untouched.
+pub fn delete_port(tunnel_id: &str, port: i32, loc: &Locale) -> Result<()> {
+    let port = port.to_string();
+    run_ok(&["port", "delete", tunnel_id, "-p", &port, "-j"], loc)
+}
+
 fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
     let joined = args.join(" ");
     let output = Command::new(bin())
@@ -103,4 +260,35 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
     }
 
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_tunnel_id;
+
+    #[test]
+    fn lowercases_and_keeps_alphanumerics() {
+        assert_eq!(sanitize_tunnel_id("Frontend3000"), "frontend3000");
+    }
+
+    #[test]
+    fn collapses_spaces_and_underscores_to_single_hyphen() {
+        assert_eq!(sanitize_tunnel_id("my  cool_app"), "my-cool-app");
+    }
+
+    #[test]
+    fn drops_disallowed_characters() {
+        assert_eq!(sanitize_tunnel_id("api@v2!#"), "apiv2");
+    }
+
+    #[test]
+    fn trims_leading_and_trailing_separators() {
+        assert_eq!(sanitize_tunnel_id("  --frontend--  "), "frontend");
+    }
+
+    #[test]
+    fn empty_when_no_valid_chars() {
+        assert_eq!(sanitize_tunnel_id("@@@"), "");
+        assert_eq!(sanitize_tunnel_id("   "), "");
+    }
 }

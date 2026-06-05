@@ -1,0 +1,387 @@
+// Modal overlay dialogs for managing groups and ports.
+// Each dialog is a full-window backdrop with a centered card; visibility is
+// driven by the `open` property bound from AppWindow.
+import { LineEdit, ComboBox, CheckBox } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+
+// One group entry for the "Add port" group picker. Kept here so both the
+// dialog and the AppWindow share the type.
+export struct GroupItem {
+    name: string,
+    tunnel-id: string,
+}
+
+// Label shown above a form field.
+component FieldLabel inherits Text {
+    color: Theme.muted;
+    font-size: Theme.fs-caption;
+    vertical-alignment: center;
+}
+
+// Collapsible "Advanced" section header (clickable row with a chevron).
+component AdvancedHeader inherits Rectangle {
+    in property <bool> expanded;
+    callback toggled();
+    height: 24px;
+    HorizontalLayout {
+        spacing: 6px;
+        alignment: start;
+        Text {
+            text: root.expanded ? "▾" : "▸";
+            color: Theme.muted;
+            font-size: Theme.fs-caption;
+            vertical-alignment: center;
+        }
+        Text {
+            text: Strings.dlg-advanced;
+            color: Theme.muted;
+            font-size: Theme.fs-caption;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
+        clicked => {
+            root.toggled();
+        }
+    }
+}
+
+// ---- New group ----
+export component CreateGroupDialog inherits Rectangle {
+    in-out property <bool> open;
+    callback submit(string /*name*/, string /*expiration*/, bool /*anonymous*/,
+                    string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
+    callback cancel();
+
+    property <bool> adv: false;
+    // Advanced-section state lives here (the widgets sit inside an `if` block,
+    // whose ids aren't reachable from reset/submit), bound two-way below.
+    property <bool> keep-headers-val: false;
+    property <string> timeout-val: "";
+
+    visible: root.open;
+    background: #00000099;
+
+    // Reset to defaults every time the dialog opens.
+    changed open => {
+        if (root.open) {
+            name-edit.text = "";
+            exp-edit.text = "30d";
+            anon-check.checked = true;
+            desc-edit.text = "";
+            root.keep-headers-val = false;
+            root.timeout-val = "";
+            root.adv = false;
+        }
+    }
+
+    // Absorb clicks on the backdrop.
+    TouchArea { }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 380px;
+        background: Theme.surface-2;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.radius;
+
+        // Keep clicks inside the card from reaching the backdrop.
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: Strings.dlg-new-group-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 700;
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-name; }
+                name-edit := LineEdit { placeholder-text: Strings.ph-group-name; }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-expiration; }
+                exp-edit := LineEdit { placeholder-text: Strings.ph-expiration; text: "30d"; }
+            }
+
+            anon-check := CheckBox {
+                text: Strings.field-anonymous;
+                checked: true;
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-description; }
+                desc-edit := LineEdit { placeholder-text: Strings.ph-description; }
+            }
+
+            AdvancedHeader {
+                expanded: root.adv;
+                toggled => {
+                    root.adv = !root.adv;
+                }
+            }
+            if root.adv : VerticalLayout {
+                spacing: 8px;
+                CheckBox {
+                    text: Strings.dlg-keep-headers;
+                    checked <=> root.keep-headers-val;
+                }
+                VerticalLayout {
+                    spacing: 4px;
+                    FieldLabel { text: Strings.dlg-request-timeout; }
+                    LineEdit {
+                        placeholder-text: Strings.ph-request-timeout;
+                        text <=> root.timeout-val;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                TxtButton {
+                    text: Strings.btn-cancel;
+                    clicked => {
+                        root.open = false;
+                        root.cancel();
+                    }
+                }
+                TxtButton {
+                    text: Strings.btn-create;
+                    primary: true;
+                    clicked => {
+                        root.submit(name-edit.text, exp-edit.text, anon-check.checked,
+                                    desc-edit.text, root.keep-headers-val, root.timeout-val);
+                        root.open = false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- Add port ----
+export component AddPortDialog inherits Rectangle {
+    in-out property <bool> open;
+    // Parallel arrays: existing groups first, then the "+ New group…" entry last
+    // (its id is empty, signalling "create a new group from `new-name`").
+    in property <[string]> group-names;
+    in property <[string]> group-ids;
+    callback submit(string /*group-id*/, string /*new-name*/, string /*port*/,
+                    string /*protocol*/, string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
+    callback cancel();
+
+    property <bool> adv: false;
+    property <string> selected-id: root.group-ids[group-combo.current-index];
+    // State for widgets nested in `if` blocks (ids there aren't reachable here).
+    property <string> newname-val: "";
+    property <bool> keep-headers-val: false;
+    property <string> timeout-val: "";
+
+    visible: root.open;
+    background: #00000099;
+
+    changed open => {
+        if (root.open) {
+            group-combo.current-index = 0;
+            root.newname-val = "";
+            port-edit.text = "";
+            proto-combo.current-index = 0;
+            desc-edit.text = "";
+            root.keep-headers-val = false;
+            root.timeout-val = "";
+            root.adv = false;
+        }
+    }
+
+    function do-submit() {
+        root.submit(root.selected-id, root.newname-val, port-edit.text,
+                    proto-combo.current-value, desc-edit.text, root.keep-headers-val, root.timeout-val);
+        root.open = false;
+    }
+
+    TouchArea { }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 380px;
+        background: Theme.surface-2;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.radius;
+
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 12px;
+
+            Text {
+                text: Strings.dlg-add-port-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 700;
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-group; }
+                group-combo := ComboBox {
+                    model: root.group-names;
+                    current-index: 0;
+                }
+            }
+
+            // Only when the "+ New group…" entry (empty id) is selected.
+            if root.selected-id == "" : VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-name; }
+                LineEdit {
+                    placeholder-text: Strings.ph-group-name;
+                    text <=> root.newname-val;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-port; }
+                port-edit := LineEdit {
+                    placeholder-text: Strings.ph-port;
+                    input-type: number;
+                    // Fast path: type a port number and press Enter.
+                    accepted => {
+                        root.do-submit();
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-protocol; }
+                proto-combo := ComboBox {
+                    model: ["auto", "http", "https"];
+                    current-index: 0;
+                }
+            }
+
+            VerticalLayout {
+                spacing: 4px;
+                FieldLabel { text: Strings.field-description; }
+                desc-edit := LineEdit { placeholder-text: Strings.ph-description; }
+            }
+
+            AdvancedHeader {
+                expanded: root.adv;
+                toggled => {
+                    root.adv = !root.adv;
+                }
+            }
+            if root.adv : VerticalLayout {
+                spacing: 8px;
+                CheckBox {
+                    text: Strings.dlg-keep-headers;
+                    checked <=> root.keep-headers-val;
+                }
+                VerticalLayout {
+                    spacing: 4px;
+                    FieldLabel { text: Strings.dlg-request-timeout; }
+                    LineEdit {
+                        placeholder-text: Strings.ph-request-timeout;
+                        text <=> root.timeout-val;
+                    }
+                }
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                TxtButton {
+                    text: Strings.btn-cancel;
+                    clicked => {
+                        root.open = false;
+                        root.cancel();
+                    }
+                }
+                TxtButton {
+                    text: Strings.btn-add;
+                    primary: true;
+                    clicked => {
+                        root.do-submit();
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---- Confirmation (delete group/port) ----
+// The message is composed in Rust (parametric, localized) and bound to
+// `Strings.confirm-message`. On accept the dialog calls `accept()`.
+export component ConfirmDialog inherits Rectangle {
+    in-out property <bool> open;
+    callback accept();
+    callback cancel();
+
+    visible: root.open;
+    background: #00000099;
+
+    TouchArea { }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 360px;
+        background: Theme.surface-2;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.radius;
+
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 16px;
+
+            Text {
+                text: Strings.confirm-message;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                wrap: word-wrap;
+            }
+
+            HorizontalLayout {
+                spacing: 8px;
+                alignment: end;
+                TxtButton {
+                    text: Strings.btn-cancel;
+                    clicked => {
+                        root.open = false;
+                        root.cancel();
+                    }
+                }
+                TxtButton {
+                    text: Strings.btn-delete;
+                    danger: true;
+                    clicked => {
+                        root.open = false;
+                        root.accept();
+                    }
+                }
+            }
+        }
+    }
+}

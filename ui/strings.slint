@@ -8,6 +8,8 @@ export global Strings {
 
     // Top bar
     in property <string> btn-refresh: "Refresh";
+    in property <string> btn-new-group: "New group";
+    in property <string> btn-add-port: "Add port";
 
     // Port list
     in property <string> no-url:       "(no URL — port not configured)";
@@ -16,4 +18,37 @@ export global Strings {
     // Port row actions
     in property <string> btn-copy: "Copy";
     in property <string> btn-open: "Open";
+    in property <string> btn-del-port: "Delete port";
+    in property <string> btn-del-group: "Delete group";
+
+    // Dialogs — common
+    in property <string> btn-cancel: "Cancel";
+    in property <string> btn-create: "Create";
+    in property <string> btn-add: "Add";
+    in property <string> btn-delete: "Delete";
+    in property <string> dlg-advanced: "Advanced";
+    in property <string> dlg-keep-headers: "Keep original Host/Origin headers";
+    in property <string> dlg-request-timeout: "Request timeout (seconds)";
+    in property <string> ph-request-timeout: "0 = disabled";
+
+    // Dialog — new group
+    in property <string> dlg-new-group-title: "New group";
+    in property <string> field-name: "Name";
+    in property <string> field-expiration: "Expiration";
+    in property <string> field-anonymous: "Allow anonymous access";
+    in property <string> field-description: "Description";
+    in property <string> ph-group-name: "e.g. frontend";
+    in property <string> ph-expiration: "e.g. 30d";
+    in property <string> ph-description: "optional";
+
+    // Dialog — add port
+    in property <string> dlg-add-port-title: "Add port";
+    in property <string> field-group: "Group";
+    in property <string> field-port: "Port number";
+    in property <string> field-protocol: "Protocol";
+    in property <string> new-group-option: "+ New group…";
+    in property <string> ph-port: "e.g. 3000";
+
+    // Confirmation dialog (message text is set from Rust with arguments)
+    in property <string> confirm-message: "";
 }
