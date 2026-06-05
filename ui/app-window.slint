@@ -3,6 +3,7 @@ import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
+import { StatusDot } from "status-dot.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -15,15 +16,6 @@ export struct PortRow {
     expiration: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"  (see theme.slint)
     host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
-}
-
-// Status dot colored by state.
-component StatusDot inherits Rectangle {
-    in property <string> status: "idle";
-    width: 9px;
-    height: 9px;
-    border-radius: self.width / 2;
-    background: Theme.status-color(root.status);
 }
 
 // Small chip (protocol, expiration).

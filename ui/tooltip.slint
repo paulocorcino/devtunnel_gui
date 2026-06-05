@@ -1,0 +1,23 @@
+// Small floating label bubble, shown above an element on hover.
+// Consumers position it (usually centered, just above the hovered element)
+// and drive `shown` from a TouchArea's has-hover.
+import { Theme } from "theme.slint";
+
+export component TooltipBubble inherits Rectangle {
+    in property <string> tip;
+    in property <bool> shown: false;
+
+    visible: root.shown && root.tip != "";
+    background: Theme.text;
+    border-radius: Theme.gap-sm;
+    width: label.preferred-width + Theme.gap * 2;
+    height: label.preferred-height + Theme.gap-sm * 2;
+
+    label := Text {
+        x: Theme.gap;
+        y: Theme.gap-sm;
+        text: root.tip;
+        color: Theme.bg;
+        font-size: Theme.fs-caption;
+    }
+}
