@@ -29,6 +29,10 @@ env_logger = { version = "0.11", optional = true }
 # OpenSSL dependency for the probe itself. Optional: only pulled by `hosting`.
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
+[target.'cfg(windows)'.dependencies]
+# HKCU Run-key auto-start toggle (issue #5).
+winreg = "0.52"
+
 [features]
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
 # Integrated SDK hosting + health probe (issue #4). Kept gated so the default

@@ -1,6 +1,8 @@
 // Hide the console window on Windows in release builds (tray app).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod autostart;
 mod devtunnel;
 mod host;
 mod locale;
