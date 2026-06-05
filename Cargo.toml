@@ -44,5 +44,8 @@ name = "host_spike"
 path = "src/bin/host_spike.rs"
 required-features = ["spike"]
 
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
 [build-dependencies]
 slint-build = "1.13"

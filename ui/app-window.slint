@@ -2,7 +2,7 @@ import { ListView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
-import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
+import { CreateGroupDialog, AddPortDialog, ConfirmDialog, SettingsDialog, GroupItem } from "dialogs.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -64,6 +64,10 @@ export component AppWindow inherits Window {
     in-out property <bool> show-create-group;
     in-out property <bool> show-add-port;
     in-out property <bool> show-confirm;
+    in-out property <bool> show-settings;
+
+    in-out property <bool> autostart-enabled;
+    callback set-autostart(bool);
 
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
@@ -104,6 +108,12 @@ export component AppWindow inherits Window {
                 }
                 Rectangle { horizontal-stretch: 1; }
                 Pill { text: root.status; }
+                TxtButton {
+                    text: Strings.btn-settings;
+                    clicked => {
+                        root.show-settings = true;
+                    }
+                }
                 TxtButton {
                     text: Strings.btn-new-group;
                     clicked => {
@@ -281,6 +291,15 @@ export component AppWindow inherits Window {
         open <=> root.show-confirm;
         accept => {
             root.confirm-accept();
+        }
+    }
+    SettingsDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-settings;
+        autostart-enabled <=> root.autostart-enabled;
+        toggled(enabled) => {
+            root.set-autostart(enabled);
         }
     }
 }

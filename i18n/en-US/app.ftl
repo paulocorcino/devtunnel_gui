@@ -13,6 +13,12 @@ status-error = error: { $message }
 btn-refresh = Refresh
 btn-new-group = New group
 btn-add-port = Add port
+btn-settings = Settings
+
+## Dialog — settings
+dlg-settings-title = Settings
+field-autostart = Start with Windows
+btn-done = Done
 
 ## Row actions
 btn-del-port = Delete port

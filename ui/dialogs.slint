@@ -328,6 +328,63 @@ export component AddPortDialog inherits Rectangle {
     }
 }
 
+// ---- Settings ----
+export component SettingsDialog inherits Rectangle {
+    in-out property <bool> open;
+    in-out property <bool> autostart-enabled;
+    callback toggled(bool);
+    callback close();
+
+    visible: root.open;
+    background: #00000099;
+
+    TouchArea { }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: 320px;
+        background: Theme.surface-2;
+        border-color: Theme.border;
+        border-width: 1px;
+        border-radius: Theme.radius;
+
+        TouchArea { }
+
+        VerticalLayout {
+            padding: 18px;
+            spacing: 16px;
+
+            Text {
+                text: Strings.dlg-settings-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 700;
+            }
+
+            CheckBox {
+                text: Strings.field-autostart;
+                checked <=> root.autostart-enabled;
+                toggled => {
+                    root.toggled(self.checked);
+                }
+            }
+
+            HorizontalLayout {
+                alignment: end;
+                TxtButton {
+                    text: Strings.btn-done;
+                    primary: true;
+                    clicked => {
+                        root.open = false;
+                        root.close();
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---- Confirmation (delete group/port) ----
 // The message is composed in Rust (parametric, localized) and bound to
 // `Strings.confirm-message`. On accept the dialog calls `accept()`.

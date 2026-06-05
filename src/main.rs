@@ -1,6 +1,7 @@
 // Hide the console window on Windows in release builds (tray app).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+mod autostart;
 mod devtunnel;
 mod host;
 mod locale;
@@ -401,6 +402,23 @@ fn main() -> anyhow::Result<()> {
         });
     }
 
+    // ---- Settings dialog: autostart toggle ----
+    // Reflect the current registry state every time the dialog is opened.
+    app.set_autostart_enabled(autostart::is_enabled());
+    {
+        let weak = app.as_weak();
+        let loc = loc.clone();
+        app.on_set_autostart(move |enabled| {
+            if let Err(e) = autostart::set_enabled(enabled) {
+                if let Some(a) = weak.upgrade() {
+                    let mut args = FluentArgs::new();
+                    args.set("message", e.to_string());
+                    a.set_status(loc.t_args("status-error", &args).into());
+                }
+            }
+        });
+    }
+
     // ---- Host / Stop toggle ----
     // Forward the command to the engine and optimistically reflect the group's
     // host state in the UI; the engine confirms via HostEvent in the pump.
@@ -791,6 +809,12 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_btn_refresh(loc.t("btn-refresh").into());
     s.set_btn_new_group(loc.t("btn-new-group").into());
     s.set_btn_add_port(loc.t("btn-add-port").into());
+    s.set_btn_settings(loc.t("btn-settings").into());
+
+    // Dialog — settings
+    s.set_dlg_settings_title(loc.t("dlg-settings-title").into());
+    s.set_field_autostart(loc.t("field-autostart").into());
+    s.set_btn_done(loc.t("btn-done").into());
     s.set_no_url(loc.t("no-url").into());
     s.set_expires_label(loc.t("expires-label").into());
     s.set_btn_copy(loc.t("btn-copy").into());
