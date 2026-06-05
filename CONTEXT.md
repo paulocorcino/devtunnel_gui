@@ -69,9 +69,15 @@ autenticada redirecionaria a sonda para a página de login).
   `microsoft/dev-tunnels`, ativamente mantido (2026), v0.1.0, feature `connections`.
 - **PowerShell:** eliminado. O CLI é chamado como binário direto, não via scripts PS.
 
-### Risco em aberto (hospedagem)
-Token host-scoped do `devtunnel token` tem vida limitada. Keep-alive de longa
-duração pode exigir re-emissão periódica do token + reconexão. A confirmar no SDK.
+### Hospedagem — validada (spike #2, ver docs/spikes/0001-sdk-hosting.md)
+O SDK hospeda em processo ✓ (curl na Public URL chegou ao servidor local, sem
+`devtunnel host` externo). Aprendizados:
+- Precisa de **dois** tunnel tokens: `host` (em `connect`) e `manage:ports`
+  (auth default do mgmt client, senão `add_port` toma 401). Mintar um por chamada
+  (repetir `--scopes` corrompe o 1º para "shost").
+- Token expira em **~24h** → keep-alive longo exige re-emitir + reconectar.
+- Build exige NASM + Strawberry Perl + `vendored-openssl` no Windows (custo de dev;
+  usuário final recebe binário pronto). Feature `spike` isola tudo isso da GUI.
 
 ## Decisões de modelo
 
