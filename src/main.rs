@@ -209,6 +209,9 @@ fn main() -> anyhow::Result<()> {
         anyhow::Result<Vec<devtunnel::Row>>,
     )>();
 
+    // Preflight results (startup probe + after sign-in) pumped to the UI thread.
+    let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
+
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
 
@@ -297,33 +300,35 @@ fn main() -> anyhow::Result<()> {
         app.on_refresh(move || load_async(&weak, &tx, &loc));
     }
 
-    // Pending deletion (set when a delete is requested, consumed on confirm).
-    let pending: Rc<RefCell<Option<PendingDelete>>> = Rc::new(RefCell::new(None));
-
-    // True while the CLI sign-in is expired (re-login banner + alert tray icon).
-    let relogin: Rc<Cell<bool>> = Rc::new(Cell::new(false));
-    // One-shot flag: re-host the persisted auto-host groups after the next
-    // successful load (set at startup and again after a successful re-login).
-    let auto_resume_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
-    // Results from the background `devtunnel user login` thread.
-    let (login_tx, login_rx) = std::sync::mpsc::channel::<anyhow::Result<()>>();
-
-    // ---- Sign in (re-login flow): run `devtunnel user login` off the UI thread ----
+    // ---- Sign in (re-login banner) ----
+    // Runs `devtunnel user login` on a background thread (interactive — opens
+    // the browser), then re-runs preflight; the pump applies the new state and
+    // reloads when it is Ok. On failure preflight re-detects LoggedOut, so the
+    // banner simply stays up.
     {
         let weak = app.as_weak();
+        let pf_tx = pf_tx.clone();
         let loc = loc.clone();
         app.on_sign_in(move || {
             if let Some(a) = weak.upgrade() {
                 a.set_status(loc.t("status-signing-in").into());
             }
-            let login_tx = login_tx.clone();
+            let pf_tx = pf_tx.clone();
             let lang = locale::system_locale();
             std::thread::spawn(move || {
                 let loc = Locale::load(&lang);
-                let _ = login_tx.send(devtunnel::user_login(&loc));
+                let _ = devtunnel::user_login(&loc);
+                let _ = pf_tx.send(devtunnel::preflight());
             });
         });
     }
+
+    // Pending deletion (set when a delete is requested, consumed on confirm).
+    let pending: Rc<RefCell<Option<PendingDelete>>> = Rc::new(RefCell::new(None));
+
+    // One-shot flag: re-host the persisted auto-host groups after the next
+    // successful load (set at startup and again after a successful re-login).
+    let auto_resume_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
 
     // ---- Create group ----
     {
@@ -584,7 +589,6 @@ fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let app_state = app_state.clone();
         let tunnel_host = tunnel_host.clone();
-        let relogin = relogin.clone();
         let auto_resume_pending = auto_resume_pending.clone();
         let tx = tx.clone();
         timer.start(
@@ -607,6 +611,26 @@ fn main() -> anyhow::Result<()> {
                 while let Ok(ev) = tray_rx.try_recv() {
                     if let TrayIconEvent::Click { .. } = ev {
                         toggle_window(&weak);
+                    }
+                }
+                // Preflight results -> set app-state, swap the tray icon, and
+                // kick the initial load when the environment is ready.
+                while let Ok(pf) = pf_rx.try_recv() {
+                    let app_state = match pf {
+                        devtunnel::Preflight::Ok => "ready",
+                        devtunnel::Preflight::CliMissing => "cli-missing",
+                        devtunnel::Preflight::LoggedOut => "relogin",
+                    };
+                    if let Some(a) = weak.upgrade() {
+                        a.set_app_state(app_state.into());
+                    }
+                    update_tray_icon(&tray, app_state);
+                    if pf == devtunnel::Preflight::Ok {
+                        // A successful preflight (startup or after re-login) re-arms
+                        // the one-shot auto-resume so persisted auto-host groups are
+                        // re-hosted once the upcoming load lands.
+                        auto_resume_pending.set(true);
+                        load_async(&weak, &tx, &loc);
                     }
                 }
                 // Load result: apply to UI and rebuild tray menu.
@@ -646,6 +670,13 @@ fn main() -> anyhow::Result<()> {
                                     let mut args = FluentArgs::new();
                                     args.set("message", msg.clone());
                                     a.set_status(loc.t_args("status-error", &args).into());
+                                    // Login expiry during hosting switches the app
+                                    // into the re-login state (banner + warning
+                                    // tray icon).
+                                    if devtunnel::is_auth_error(msg) {
+                                        a.set_app_state("relogin".into());
+                                        update_tray_icon(&tray, "relogin");
+                                    }
                                 }
                             }
                             let id = map_host_state(&hs);
@@ -664,41 +695,17 @@ fn main() -> anyhow::Result<()> {
                         }
                         host::HostEvent::ReloginRequired { tunnel_id } => {
                             log::warn!("host: re-login required (reported for {tunnel_id})");
-                            // Enter the re-login state once: banner + alert tray
-                            // icon + a single Windows toast.
-                            if !relogin.get() {
-                                relogin.set(true);
-                                if let Some(a) = weak.upgrade() {
-                                    a.set_relogin_required(true);
+                            // Enter the re-login state: banner + alert tray icon +
+                            // a single Windows toast. The banner stays up until a
+                            // successful sign-in flips preflight back to Ok.
+                            if let Some(a) = weak.upgrade() {
+                                if a.get_app_state() != "relogin" {
+                                    a.set_app_state("relogin".into());
                                     a.set_status(loc.t("relogin-message").into());
+                                    update_tray_icon(&tray, "relogin");
+                                    #[cfg(windows)]
+                                    show_relogin_toast(&loc);
                                 }
-                                let _ = tray.set_icon(Some(build_alert_icon()));
-                                #[cfg(windows)]
-                                show_relogin_toast(&loc);
-                            }
-                        }
-                    }
-                }
-
-                // Sign-in results from the background `devtunnel user login`.
-                while let Ok(result) = login_rx.try_recv() {
-                    match result {
-                        Ok(()) => {
-                            // Clear the re-login state and re-resolve + re-host the
-                            // auto-host groups via a fresh load.
-                            relogin.set(false);
-                            if let Some(a) = weak.upgrade() {
-                                a.set_relogin_required(false);
-                            }
-                            let _ = tray.set_icon(Some(build_icon()));
-                            auto_resume_pending.set(true);
-                            load_async(&weak, &tx, &loc);
-                        }
-                        Err(e) => {
-                            if let Some(a) = weak.upgrade() {
-                                let mut args = FluentArgs::new();
-                                args.set("message", e.to_string());
-                                a.set_status(loc.t_args("status-error", &args).into());
                             }
                         }
                     }
@@ -767,8 +774,9 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // ---- Initial paint from the row cache (last successful load), then the
-    // async refresh reconciles from the service. Keeps the UI useful instantly.
+    // ---- Initial paint from the row cache (last successful load). Keeps the UI
+    // useful instantly; the async refresh below reconciles from the service once
+    // preflight reports the environment is ready.
     {
         let cached = state::load_row_cache();
         if !cached.is_empty() {
@@ -777,8 +785,15 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    // ---- Initial load ----
-    load_async(&app.as_weak(), &tx, &loc);
+    // ---- Initial preflight (background) ----
+    // Sets app-state from the probe; the pump kicks the first load only when
+    // the environment is ready (CLI present + logged in).
+    {
+        let pf_tx = pf_tx.clone();
+        std::thread::spawn(move || {
+            let _ = pf_tx.send(devtunnel::preflight());
+        });
+    }
 
     // Start minimized to tray: never call `show()`, just run the event loop.
     // The window appears via tray icon click or the "Open window" menu item.
@@ -937,8 +952,15 @@ fn apply_rows(
         Err(e) => {
             // Rebuild so that the removed placeholder / restored hidden row is reflected.
             rebuild_rows(&app, tray, actions, state, loc);
+            let msg = e.to_string();
+            // Login expiry during management switches the app into the
+            // re-login state (banner + warning tray icon).
+            if devtunnel::is_auth_error(&msg) {
+                app.set_app_state("relogin".into());
+                update_tray_icon(tray, "relogin");
+            }
             let mut args = FluentArgs::new();
-            args.set("message", e.to_string());
+            args.set("message", msg);
             app.set_status(loc.t_args("status-error", &args).into());
             false
         }
@@ -1078,6 +1100,14 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_ph_expiration(loc.t("ph-expiration").into());
     s.set_ph_description(loc.t("ph-description").into());
 
+    // Preflight banner / re-login
+    s.set_banner_cli_missing_title(loc.t("banner-cli-missing-title").into());
+    s.set_banner_cli_missing_body(loc.t("banner-cli-missing-body").into());
+    s.set_banner_cli_missing_install(loc.t("banner-cli-missing-install").into());
+    s.set_banner_relogin_title(loc.t("banner-relogin-title").into());
+    s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
+    s.set_btn_sign_in(loc.t("btn-sign-in").into());
+
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());
     s.set_field_group(loc.t("field-group").into());
@@ -1094,7 +1124,6 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
 
     // Re-login
     s.set_relogin_message(loc.t("relogin-message").into());
-    s.set_btn_sign_in(loc.t("btn-sign-in").into());
 }
 
 #[cfg(test)]
@@ -1237,14 +1266,26 @@ fn build_icon() -> Icon {
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
 }
 
-/// Solid orange 32×32 alert icon, swapped in while a re-login is required.
-fn build_alert_icon() -> Icon {
+/// Solid amber 32×32 warning icon shown while the app is not "ready"
+/// (CLI missing / re-login required).
+fn build_warning_icon() -> Icon {
     const SIZE: u32 = 32;
     let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
     for _ in 0..(SIZE * SIZE) {
-        rgba.extend_from_slice(&[0xff, 0x8c, 0x00, 0xff]); // dark orange
+        rgba.extend_from_slice(&[0xf5, 0x9e, 0x0b, 0xff]); // amber
     }
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Swaps the tray icon to match the app-level preflight state: the normal blue
+/// icon when "ready", the warning variant otherwise.
+fn update_tray_icon(tray: &tray_icon::TrayIcon, app_state: &str) {
+    let icon = if app_state == "ready" {
+        build_icon()
+    } else {
+        build_warning_icon()
+    };
+    let _ = tray.set_icon(Some(icon));
 }
 
 /// Fires the one-shot Windows toast for the re-login case (no toasts for any
