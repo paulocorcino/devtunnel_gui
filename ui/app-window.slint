@@ -3,6 +3,7 @@ import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
+import { SettingsDialog } from "settings.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -64,11 +65,21 @@ export component AppWindow inherits Window {
     in-out property <bool> show-create-group;
     in-out property <bool> show-add-port;
     in-out property <bool> show-confirm;
+    in-out property <bool> show-settings;
 
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
 
+    // Settings: current "start with Windows" state (set from Rust at startup).
+    in-out property <bool> auto-start-enabled;
+    // Re-login: true while the CLI sign-in is expired; shows the banner.
+    in property <bool> relogin-required: false;
+
     callback refresh();
+    // The user toggled the auto-start checkbox in the settings dialog.
+    callback auto-start-changed(bool);
+    // The user clicked "Sign in" in the re-login banner.
+    callback sign-in();
     // Start / stop hosting a group (by Real Tunnel ID).
     callback host(string /*tunnel-id*/);
     callback stop(string /*tunnel-id*/);
@@ -123,9 +134,42 @@ export component AppWindow inherits Window {
                         root.refresh();
                     }
                 }
+                TxtButton {
+                    text: Strings.btn-settings;
+                    clicked => {
+                        root.show-settings = true;
+                    }
+                }
             }
         }
         Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Re-login banner (shown while the CLI sign-in is expired) ----
+        if root.relogin-required : Rectangle {
+            background: Theme.surface;
+            height: 40px;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                spacing: Theme.gap;
+                Text {
+                    text: Strings.relogin-message;
+                    color: Theme.down;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                Rectangle { horizontal-stretch: 1; }
+                TxtButton {
+                    text: Strings.btn-sign-in;
+                    primary: true;
+                    clicked => {
+                        root.sign-in();
+                    }
+                }
+            }
+        }
+        if root.relogin-required : Rectangle { height: 1px; background: Theme.border; }
 
         // ---- List ----
         ListView {
@@ -281,6 +325,15 @@ export component AppWindow inherits Window {
         open <=> root.show-confirm;
         accept => {
             root.confirm-accept();
+        }
+    }
+    SettingsDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-settings;
+        auto-start <=> root.auto-start-enabled;
+        auto-start-changed(enabled) => {
+            root.auto-start-changed(enabled);
         }
     }
 }
