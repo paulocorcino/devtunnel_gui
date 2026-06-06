@@ -13,26 +13,47 @@ export struct PortView {
     protocol: string,
     url: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"
+    // Stable index into the flat row model in Rust, used to key the expandable
+    // detail panel (issue #17). -1 for inert placeholder rows.
+    row-index: int,
 }
 
 export component PortRow inherits Rectangle {
     in property <PortView> pv;
     // Show row actions permanently (compact / touch layouts).
     in property <bool> always-show-actions: false;
+    // True when this row's detail panel is currently expanded.
+    in property <bool> selected: false;
     callback copy-url(string);
     callback open-url(string);
     callback delete-port(int);
+    // Row click: expand/collapse the detail panel for (row-index, port).
+    callback toggle-detail(int /*row-index*/, int /*port*/);
 
     // Localized tooltip label for a status id (the "badge").
     pure function status-label(s: string) -> string {
         s == "ok" ? Strings.badge-operational : (s == "warn" ? Strings.badge-service-down : (s == "down" ? Strings.badge-down : (s == "provisioning" ? Strings.badge-provisioning : (s == "host" ? Strings.badge-hosting : Strings.badge-stopped))));
     }
 
+    // A real, configured port (not a provisioning placeholder) can expand its
+    // metrics/logs detail panel.
+    property <bool> expandable: pv.row-index >= 0 && pv.status != "provisioning";
+
     height: Theme.row-height;
-    background: hover.has-hover ? Theme.surface-2 : transparent;
+    background: root.selected
+        ? Theme.surface-2
+        : (hover.has-hover ? Theme.surface-2 : transparent);
     border-radius: Theme.gap-sm;
 
-    hover := TouchArea { }
+    // Click on the row body (behind the URL/actions) toggles the detail panel.
+    hover := TouchArea {
+        mouse-cursor: root.expandable ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            if (root.expandable) {
+                root.toggle-detail(pv.row-index, pv.port);
+            }
+        }
+    }
 
     HorizontalLayout {
         padding-left: Theme.pad;

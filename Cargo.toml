@@ -29,15 +29,20 @@ env_logger = { version = "0.11", optional = true }
 # OpenSSL dependency for the probe itself. Optional: only pulled by `hosting`.
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
-# Initial dark-mode detection: read the Windows "apps use light theme" setting.
 [target.'cfg(windows)'.dependencies]
+# Initial dark-mode detection: read the Windows "apps use light theme" setting.
+# Also used for the HKCU Run-key auto-start toggle (issue #5).
 winreg = "0.55"
+# Windows toast for the re-login case only (issue #5).
+tauri-winrt-notification = "0.7"
 
 [features]
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
 # Integrated SDK hosting + health probe (issue #4). Kept gated so the default
 # `cargo build` stays light (no vendored OpenSSL / heavy toolchain).
-hosting = ["dep:tunnels", "dep:tokio", "dep:ureq", "dep:env_logger"]
+# env_logger is no longer needed here: the GUI installs its own capturing
+# logger (src/logbuf.rs) in every build. The spike bin still uses env_logger.
+hosting = ["dep:tunnels", "dep:tokio", "dep:ureq"]
 
 [[bin]]
 name = "devtunnel_gui"

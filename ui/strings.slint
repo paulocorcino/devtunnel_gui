@@ -10,6 +10,7 @@ export global Strings {
     in property <string> btn-refresh: "Refresh";
     in property <string> btn-new-group: "New group";
     in property <string> btn-add-port: "Add port";
+    in property <string> btn-settings: "Settings";
 
     // Port list
     in property <string> no-url:       "(no URL — port not configured)";
@@ -30,6 +31,7 @@ export global Strings {
     in property <string> badge-service-down: "Service down";
     in property <string> badge-down: "Down";
     in property <string> badge-provisioning: "Provisioning…";
+    in property <string> badge-hosted-external: "Hosted elsewhere";
     in property <string> btn-del-port: "Delete port";
     in property <string> btn-del-group: "Delete group";
 
@@ -80,6 +82,33 @@ export global Strings {
     // Empty state
     in property <string> empty-title: "No groups yet";
     in property <string> btn-create-group: "+ Create group";
+
+    // Port detail panel
+    in property <string> tab-metrics: "Metrics";
+    in property <string> tab-logs: "Logs";
+    in property <string> metric-upload: "Upload";
+    in property <string> metric-download: "Download";
+    in property <string> metric-total: "Total";
+    in property <string> metric-rate: "Rate";
+    in property <string> metric-connections: "Connections";
+    in property <string> metric-active: "Active";
+    in property <string> metric-na: "n/a";
+    in property <string> logs-empty: "No log entries yet.";
+
+    // Settings
+    in property <string> settings-title: "Settings";
+    in property <string> field-auto-start: "Start with Windows";
+    in property <string> field-probe-interval: "Probe interval (seconds)";
+    in property <string> btn-close: "Close";
+
+    // Preflight banner / re-login
+    in property <string> banner-cli-missing-title: "Dev Tunnels CLI not found";
+    in property <string> banner-cli-missing-body: "The `devtunnel` CLI is required but was not found on PATH.";
+    in property <string> banner-cli-missing-install: "Install it with: winget install Microsoft.devtunnel — or set DEVTUNNEL_BIN to the executable path.";
+    in property <string> banner-relogin-title: "Sign in required";
+    in property <string> banner-relogin-body: "Your Dev Tunnels login is missing or has expired. Sign in to continue.";
+    in property <string> relogin-message: "Sign-in expired — sign in again to keep hosting";
+    in property <string> btn-sign-in: "Sign in";
 
     // Confirmation dialog (message text is set from Rust with arguments)
     in property <string> confirm-message: "";

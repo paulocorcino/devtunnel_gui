@@ -13,6 +13,7 @@ status-error = error: { $message }
 btn-refresh = Refresh
 btn-new-group = New group
 btn-add-port = Add port
+btn-settings = Settings
 
 ## Row actions
 btn-del-port = Delete port
@@ -74,6 +75,38 @@ badge-operational = Operational
 badge-service-down = Service down
 badge-down = Down
 badge-provisioning = Provisioning…
+badge-hosted-external = Hosted elsewhere
+
+## Settings
+settings-title = Settings
+field-auto-start = Start with Windows
+field-probe-interval = Probe interval (seconds)
+btn-close = Close
+
+## Preflight banner / re-login
+banner-cli-missing-title = Dev Tunnels CLI not found
+banner-cli-missing-body = The `devtunnel` CLI is required but was not found on PATH.
+banner-cli-missing-install = Install it with: winget install Microsoft.devtunnel — or set DEVTUNNEL_BIN to the executable path.
+banner-relogin-title = Sign in required
+banner-relogin-body = Your Dev Tunnels login is missing or has expired. Sign in to continue.
+relogin-message = Sign-in expired — sign in again to keep hosting
+btn-sign-in = Sign in
+status-signing-in = signing in…
+toast-relogin-title = DevTunnel GUI — sign-in required
+toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
+
+## Port detail panel
+tab-metrics = Metrics
+tab-logs = Logs
+metric-upload = Upload
+metric-download = Download
+metric-total = Total
+metric-rate = Rate
+metric-connections = Connections
+metric-active = Active
+metric-na = n/a
+metric-rate-per-second = { $value }/s
+logs-empty = No log entries yet.
 
 ## Status-dot tooltip labels (idle / hosting states; health states reuse badge-*)
 badge-stopped = Stopped
@@ -108,3 +141,4 @@ err-cli-failed = `devtunnel { $args }` returned error: { $stderr }
 err-cli-invalid-json = invalid JSON from `devtunnel { $args }`
 err-empty-group-name = group name must contain at least one letter or digit
 err-invalid-port = port number must be between 1 and 65535
+err-port-not-found = port { $port } not found in tunnel { $tunnel }

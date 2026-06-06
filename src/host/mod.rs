@@ -51,6 +51,9 @@ pub enum HostCommand {
 pub enum HostEvent {
     /// A group's hosting state changed.
     State { tunnel_id: String, state: HostState },
+    /// The CLI sign-in is expired or absent; hosting cannot proceed until the
+    /// user re-authenticates via `devtunnel user login`.
+    ReloginRequired { tunnel_id: String },
 }
 
 /// The control handle for the host engine. Implementations forward commands to

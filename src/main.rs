@@ -1,19 +1,23 @@
 // Hide the console window on Windows in release builds (tray app).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod autostart;
 mod devtunnel;
 mod host;
 mod locale;
+mod logbuf;
 mod model;
 #[cfg(feature = "hosting")]
 mod probe;
+mod state;
 
 slint::include_modules!();
 
 use fluent_bundle::FluentArgs;
 use locale::Locale;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -31,6 +35,10 @@ enum Action {
     Copy(String),
     Open(String),
 }
+
+/// Status id assigned to optimistic placeholder rows (see [`rebuild_rows`]).
+/// Drives the "Provisioning…" badge and disables the row's action buttons.
+const PROVISIONING_STATUS: &str = "provisioning";
 
 /// A deletion awaiting user confirmation. `port == None` means delete the whole group.
 struct PendingDelete {
@@ -62,6 +70,12 @@ struct LiveState {
     placeholders: Vec<Placeholder>,
     /// Monotonic counter for placeholder ids.
     next_placeholder_id: u64,
+    /// Port whose detail panel is expanded, keyed by (tunnel_id, port).
+    /// `None` = collapsed; the metrics poll is a no-op while collapsed.
+    detail: Option<(String, i32)>,
+    /// Optimistic hidden-delete keys for in-flight delete operations.
+    /// `(tunnel_id, None)` hides the whole group; `(tunnel_id, Some(port))` hides one port.
+    hidden: HashSet<(String, Option<i32>)>,
 }
 
 impl LiveState {
@@ -80,17 +94,29 @@ impl LiveState {
     fn remove_placeholder(&mut self, id: u64) {
         self.placeholders.retain(|p| p.id != id);
     }
+
+    fn hide_delete(&mut self, tunnel_id: String, port: Option<i32>) -> (String, Option<i32>) {
+        let key = (tunnel_id, port);
+        self.hidden.insert(key.clone());
+        key
+    }
+
+    fn unhide_delete(&mut self, key: &(String, Option<i32>)) {
+        self.hidden.remove(key);
+    }
 }
 
 /// Derives a row's `status` id from the latest probe + host state.
 /// Probe result wins (it is the most specific); otherwise fall back to the
-/// group's host state ("host" = hosting but not yet probed) or "idle".
-fn derive_status(state: &LiveState, tunnel_id: &str, port: i32) -> String {
+/// group's host state ("host" = hosting but not yet probed), then to the
+/// service-reported `host_connections` count, then "idle".
+fn derive_status(state: &LiveState, tunnel_id: &str, port: i32, host_connections: i64) -> String {
     if let Some(s) = state.probe.get(&(tunnel_id.to_string(), port)) {
         return s.clone();
     }
     match state.host.get(tunnel_id).map(String::as_str) {
         Some("hosting") | Some("host") => "host".to_string(),
+        _ if host_connections > 0 => "host".to_string(),
         _ => "idle".to_string(),
     }
 }
@@ -136,22 +162,24 @@ fn hosting_targets(state: &LiveState) -> Vec<probe::ProbeTarget> {
         .collect()
 }
 
-/// The group toggle label state ("hosting" when the group is being hosted).
-fn derive_host_state(state: &LiveState, tunnel_id: &str) -> String {
+/// Derives the group toggle state:
+/// - `"hosting"` when this session is actively hosting the group,
+/// - `"external"` when the service reports active connections but this session is not hosting,
+/// - `""` otherwise.
+fn derive_host_state(state: &LiveState, tunnel_id: &str, host_connections: i64) -> String {
     match state.host.get(tunnel_id).map(String::as_str) {
         Some("hosting") | Some("host") => "hosting".to_string(),
+        _ if host_connections > 0 => "external".to_string(),
         _ => String::new(),
     }
 }
 
 fn main() -> anyhow::Result<()> {
-    // In the hosting build, surface the host-engine / SDK logs. Default to info for
-    // our crate + the tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=debug`).
-    #[cfg(feature = "hosting")]
-    env_logger::Builder::from_env(
-        env_logger::Env::default().default_filter_or("devtunnel_gui=debug,tunnels=info"),
-    )
-    .init();
+    // Install the capturing logger in every build: it tees records to stderr
+    // (what env_logger used to print in the hosting build) and into the ring
+    // buffer behind the Logs tab. Default to debug for our crate + info for the
+    // tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=trace`).
+    let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=debug,tunnels=info").install();
 
     let app = AppWindow::new()?;
 
@@ -191,10 +219,26 @@ fn main() -> anyhow::Result<()> {
     // The UI thread (timer) applies the result to the window and rebuilds the
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
     // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
-    let (tx, rx) = std::sync::mpsc::channel::<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>();
+    let (tx, rx) = std::sync::mpsc::channel::<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>();
+
+    // Preflight results (startup probe + after sign-in) pumped to the UI thread.
+    let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
+
+    // Selected-port metrics results, tagged with (tunnel_id, port) so the pump
+    // can drop results that arrive after the selection changed.
+    let (metrics_tx, metrics_rx) =
+        std::sync::mpsc::channel::<(String, i32, anyhow::Result<devtunnel::PortMetrics>)>();
 
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
+
+    // Persistent app state (auto-host set + settings), loaded once on startup and
+    // saved best-effort whenever the auto-host set or settings change.
+    let app_state: Rc<RefCell<state::AppState>> = Rc::new(RefCell::new(state::AppState::load()));
 
     // ---- Host + probe engines ----
     // The host engine starts in every build (it is a no-op without `hosting`);
@@ -207,12 +251,65 @@ fn main() -> anyhow::Result<()> {
     let (probe_evt_rx, probe_cmd_tx) = {
         let (probe_evt_tx, probe_evt_rx) = std::sync::mpsc::channel::<probe::ProbeEvent>();
         let probe_cmd_tx = probe::spawn(probe_evt_tx);
+        // Apply the persisted steady-state cadence (conservative 60 s default;
+        // clamped to >= 1 s so a hand-edited 0 cannot busy-loop the probe).
+        let secs = app_state.borrow().settings.probe_interval_secs.max(1);
+        let _ = probe_cmd_tx.send(probe::ProbeCommand::SetInterval(Duration::from_secs(secs)));
         (probe_evt_rx, probe_cmd_tx)
     };
 
     // The default (non-hosting) build shows the toggle disabled.
     #[cfg(feature = "hosting")]
     app.set_hosting_enabled(true);
+
+    // ---- Settings: auto-start (start with Windows) ----
+    // The registry is the source of truth for the checkbox (the user may have
+    // removed the Run entry externally); the persisted setting follows it.
+    #[cfg(windows)]
+    {
+        let enabled = autostart::is_enabled();
+        app.set_auto_start_enabled(enabled);
+        app_state.borrow_mut().settings.auto_start = enabled;
+    }
+    {
+        let weak = app.as_weak();
+        let app_state = app_state.clone();
+        app.on_auto_start_changed(move |enabled| {
+            #[cfg(windows)]
+            {
+                if let Err(e) = autostart::set_enabled(enabled) {
+                    log::warn!("autostart: failed to apply toggle: {e}");
+                }
+                // Re-read the registry so the checkbox reflects the actual state
+                // (reverts the optimistic toggle if the write failed).
+                let actual = autostart::is_enabled();
+                if let Some(a) = weak.upgrade() {
+                    a.set_auto_start_enabled(actual);
+                }
+                let mut st = app_state.borrow_mut();
+                st.settings.auto_start = actual;
+                st.save();
+            }
+            #[cfg(not(windows))]
+            {
+                let mut st = app_state.borrow_mut();
+                st.settings.auto_start = enabled;
+                st.save();
+            }
+        });
+    }
+    {
+        // Re-sync the toggle from the registry each time the Settings dialog
+        // opens, in case the Run entry changed out of band, then show it.
+        let weak = app.as_weak();
+        app.on_open_settings(move || {
+            if let Some(a) = weak.upgrade() {
+                #[cfg(windows)]
+                a.set_auto_start_enabled(autostart::is_enabled());
+                a.set_show_settings(true);
+            }
+        });
+    }
 
     // ---- UI callbacks ----
     app.on_copy_url(|url| copy(&url));
@@ -224,8 +321,35 @@ fn main() -> anyhow::Result<()> {
         app.on_refresh(move || load_async(&weak, &tx, &loc));
     }
 
+    // ---- Sign in (re-login banner) ----
+    // Runs `devtunnel user login` on a background thread (interactive — opens
+    // the browser), then re-runs preflight; the pump applies the new state and
+    // reloads when it is Ok. On failure preflight re-detects LoggedOut, so the
+    // banner simply stays up.
+    {
+        let weak = app.as_weak();
+        let pf_tx = pf_tx.clone();
+        let loc = loc.clone();
+        app.on_sign_in(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_status(loc.t("status-signing-in").into());
+            }
+            let pf_tx = pf_tx.clone();
+            let lang = locale::system_locale();
+            std::thread::spawn(move || {
+                let loc = Locale::load(&lang);
+                let _ = devtunnel::user_login(&loc);
+                let _ = pf_tx.send(devtunnel::preflight());
+            });
+        });
+    }
+
     // Pending deletion (set when a delete is requested, consumed on confirm).
     let pending: Rc<RefCell<Option<PendingDelete>>> = Rc::new(RefCell::new(None));
+
+    // One-shot flag: re-host the persisted auto-host groups after the next
+    // successful load (set at startup and again after a successful re-login).
+    let auto_resume_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
 
     // ---- Create group ----
     {
@@ -258,6 +382,7 @@ fn main() -> anyhow::Result<()> {
                     "status-creating-group",
                     &loc,
                     Some(placeholder_id),
+                    None,
                     move |loc| devtunnel::create_group(&opts, loc).map(|_| ()),
                 );
             },
@@ -317,6 +442,7 @@ fn main() -> anyhow::Result<()> {
                     "status-adding-port",
                     &loc,
                     Some(placeholder_id),
+                    None,
                     move |loc| {
                         let tunnel_id = if group_id.is_empty() {
                             devtunnel::create_group(
@@ -385,18 +511,26 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         let loc = loc.clone();
         let pending = pending.clone();
+        let state = state.clone();
+        let tray = tray.clone();
+        let actions = actions.clone();
         app.on_confirm_accept(move || {
             let Some(p) = pending.borrow_mut().take() else {
                 return;
             };
             let tunnel_id = p.tunnel_id;
             let port = p.port;
+            let hidden_key = state.borrow_mut().hide_delete(tunnel_id.clone(), port);
+            if let Some(a) = weak.upgrade() {
+                rebuild_rows(&a, &tray, &actions, &state, &loc);
+            }
             run_op_async(
                 &weak,
                 &tx,
                 "status-deleting",
                 &loc,
                 None,
+                Some(hidden_key),
                 move |loc| match port {
                     Some(pn) => devtunnel::delete_port(&tunnel_id, pn, loc),
                     None => devtunnel::delete_group(&tunnel_id, loc),
@@ -416,11 +550,18 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let app_state = app_state.clone();
         app.on_host(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Host {
                 tunnel_id: id.clone(),
             });
+            // Track the group as auto-host so it is re-hosted on next startup.
+            {
+                let mut st = app_state.borrow_mut();
+                st.add_auto_host(&id);
+                st.save();
+            }
             state.borrow_mut().host.insert(id, "host".to_string());
             if let Some(a) = weak.upgrade() {
                 rebuild_rows(&a, &tray, &actions, &state, &loc);
@@ -434,11 +575,18 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let app_state = app_state.clone();
         app.on_stop(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Stop {
                 tunnel_id: id.clone(),
             });
+            // An explicit Stop removes the group from the auto-host set.
+            {
+                let mut st = app_state.borrow_mut();
+                st.remove_auto_host(&id);
+                st.save();
+            }
             let mut st = state.borrow_mut();
             st.host.remove(&id);
             // Drop probe results for this group's ports so badges clear.
@@ -448,6 +596,61 @@ fn main() -> anyhow::Result<()> {
                 rebuild_rows(&a, &tray, &actions, &state, &loc);
             }
         });
+    }
+
+    // ---- Port detail panel: row click toggles selection ----
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        let loc = loc.clone();
+        let metrics_tx = metrics_tx.clone();
+        app.on_toggle_detail(move |index, tunnel_id, port| {
+            let tid = tunnel_id.to_string();
+            let mut st = state.borrow_mut();
+            let same = st
+                .detail
+                .as_ref()
+                .is_some_and(|(t, p)| *t == tid && *p == port);
+            if same {
+                // Collapse: clear the selection; the poll timer goes idle.
+                st.detail = None;
+                drop(st);
+                if let Some(a) = weak.upgrade() {
+                    a.set_selected_index(-1);
+                }
+            } else {
+                st.detail = Some((tid.clone(), port));
+                drop(st);
+                if let Some(a) = weak.upgrade() {
+                    a.set_selected_index(index);
+                    // Show "n/a" until the first poll lands; logs straight away.
+                    apply_metrics(&a, None, &loc);
+                    refresh_logs(&a);
+                }
+                spawn_metrics_fetch(&metrics_tx, tid, port);
+            }
+        });
+    }
+
+    // ---- Port detail polling: refresh metrics + logs while a panel is open ----
+    // A no-op while collapsed (detail == None), so no CLI calls are wasted.
+    let detail_timer = slint::Timer::default();
+    {
+        let weak = app.as_weak();
+        let state = state.clone();
+        let metrics_tx = metrics_tx.clone();
+        detail_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(3),
+            move || {
+                let selected = state.borrow().detail.clone();
+                let Some((tid, port)) = selected else { return };
+                spawn_metrics_fetch(&metrics_tx, tid, port);
+                if let Some(a) = weak.upgrade() {
+                    refresh_logs(&a);
+                }
+            },
+        );
     }
 
     // ---- Pump events (tray + load results) into the Slint loop via Timer ----
@@ -460,6 +663,10 @@ fn main() -> anyhow::Result<()> {
         let actions = actions.clone();
         let loc = loc.clone();
         let state = state.clone();
+        let app_state = app_state.clone();
+        let tunnel_host = tunnel_host.clone();
+        let auto_resume_pending = auto_resume_pending.clone();
+        let tx = tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -482,43 +689,142 @@ fn main() -> anyhow::Result<()> {
                         toggle_window(&weak);
                     }
                 }
+                // Preflight results -> set app-state, swap the tray icon, and
+                // kick the initial load when the environment is ready.
+                while let Ok(pf) = pf_rx.try_recv() {
+                    let app_state = match pf {
+                        devtunnel::Preflight::Ok => "ready",
+                        devtunnel::Preflight::CliMissing => "cli-missing",
+                        devtunnel::Preflight::LoggedOut => "relogin",
+                    };
+                    if let Some(a) = weak.upgrade() {
+                        a.set_app_state(app_state.into());
+                    }
+                    update_tray_icon(&tray, app_state);
+                    if pf == devtunnel::Preflight::Ok {
+                        // A successful preflight (startup or after re-login) re-arms
+                        // the one-shot auto-resume so persisted auto-host groups are
+                        // re-hosted once the upcoming load lands.
+                        auto_resume_pending.set(true);
+                        load_async(&weak, &tx, &loc);
+                    }
+                }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
-                while let Ok((placeholder_id, result)) = rx.try_recv() {
-                    apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
+                // Tracks whether at least one *successful* load landed this tick;
+                // a failed first fetch must not consume the one-shot auto-resume.
+                let mut load_ok = false;
+                while let Ok((placeholder_id, hidden_key, result)) = rx.try_recv() {
+                    if apply_rows(
+                        &weak,
+                        &tray,
+                        &actions,
+                        &state,
+                        placeholder_id,
+                        hidden_key,
+                        result,
+                        &loc,
+                    ) {
+                        load_ok = true;
+                    }
                     loaded = true;
+                }
+
+                // Selected-port metrics -> detail panel (skip stale selections).
+                while let Ok((tid, port, result)) = metrics_rx.try_recv() {
+                    let current = state
+                        .borrow()
+                        .detail
+                        .as_ref()
+                        .is_some_and(|(t, p)| *t == tid && *p == port);
+                    if !current {
+                        continue;
+                    }
+                    if let Some(a) = weak.upgrade() {
+                        // Errors (port deleted, CLI hiccup) degrade to "n/a".
+                        apply_metrics(&a, result.ok().as_ref(), &loc);
+                    }
                 }
 
                 // Host engine state changes -> update per-group host state.
                 let mut host_changed = false;
-                while let Ok(host::HostEvent::State {
-                    tunnel_id,
-                    state: hs,
-                }) = host_evt_rx.try_recv()
-                {
-                    log::debug!("host event: {tunnel_id} -> {hs:?}");
-                    // Surface connection failures in the status bar (otherwise a failed
-                    // Host is silent and looks like "nothing happened").
-                    if let host::HostState::Error(msg) = &hs {
-                        if let Some(a) = weak.upgrade() {
-                            let mut args = FluentArgs::new();
-                            args.set("message", msg.clone());
-                            a.set_status(loc.t_args("status-error", &args).into());
+                while let Ok(ev) = host_evt_rx.try_recv() {
+                    match ev {
+                        host::HostEvent::State {
+                            tunnel_id,
+                            state: hs,
+                        } => {
+                            log::debug!("host event: {tunnel_id} -> {hs:?}");
+                            // Surface connection failures in the status bar (otherwise a failed
+                            // Host is silent and looks like "nothing happened").
+                            if let host::HostState::Error(msg) = &hs {
+                                if let Some(a) = weak.upgrade() {
+                                    let mut args = FluentArgs::new();
+                                    args.set("message", msg.clone());
+                                    a.set_status(loc.t_args("status-error", &args).into());
+                                    // Login expiry during hosting switches the app
+                                    // into the re-login state (banner + warning
+                                    // tray icon).
+                                    if devtunnel::is_auth_error(msg) {
+                                        a.set_app_state("relogin".into());
+                                        update_tray_icon(&tray, "relogin");
+                                    }
+                                }
+                            }
+                            let id = map_host_state(&hs);
+                            let mut st = state.borrow_mut();
+                            match id {
+                                Some(v) => {
+                                    st.host.insert(tunnel_id, v.to_string());
+                                }
+                                None => {
+                                    // Stopped / Idle / Error: clear host + probe for the group.
+                                    st.host.remove(&tunnel_id);
+                                    st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                                }
+                            }
+                            host_changed = true;
+                        }
+                        host::HostEvent::ReloginRequired { tunnel_id } => {
+                            log::warn!("host: re-login required (reported for {tunnel_id})");
+                            // Enter the re-login state: banner + alert tray icon +
+                            // a single Windows toast. The banner stays up until a
+                            // successful sign-in flips preflight back to Ok.
+                            if let Some(a) = weak.upgrade() {
+                                if a.get_app_state() != "relogin" {
+                                    a.set_app_state("relogin".into());
+                                    a.set_status(loc.t("relogin-message").into());
+                                    update_tray_icon(&tray, "relogin");
+                                    #[cfg(windows)]
+                                    show_relogin_toast(&loc);
+                                }
+                            }
                         }
                     }
-                    let id = map_host_state(&hs);
-                    let mut st = state.borrow_mut();
-                    match id {
-                        Some(v) => {
-                            st.host.insert(tunnel_id, v.to_string());
-                        }
-                        None => {
-                            // Stopped / Idle / Error: clear host + probe for the group.
-                            st.host.remove(&tunnel_id);
-                            st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                }
+
+                // One-shot auto-resume (hosting build): after a successful load,
+                // re-host every persisted auto-host group that resolves to a known
+                // Real Tunnel ID with at least one port; log the skipped ones.
+                if cfg!(feature = "hosting") && load_ok && auto_resume_pending.get() {
+                    auto_resume_pending.set(false);
+                    let ids = app_state.borrow().auto_host.clone();
+                    if !ids.is_empty() {
+                        let mut st = state.borrow_mut();
+                        for id in &ids {
+                            let known = st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
+                            if known {
+                                log::info!("auto-resume: hosting {id}");
+                                tunnel_host.send(host::HostCommand::Host {
+                                    tunnel_id: id.clone(),
+                                });
+                                st.host.insert(id.clone(), "host".to_string());
+                                host_changed = true;
+                            } else {
+                                log::info!("auto-resume: skipping unknown or portless group {id}");
+                            }
                         }
                     }
-                    host_changed = true;
                 }
 
                 // Probe results -> update per-port health status.
@@ -560,8 +866,26 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // ---- Initial load ----
-    load_async(&app.as_weak(), &tx, &loc);
+    // ---- Initial paint from the row cache (last successful load). Keeps the UI
+    // useful instantly; the async refresh below reconciles from the service once
+    // preflight reports the environment is ready.
+    {
+        let cached = state::load_row_cache();
+        if !cached.is_empty() {
+            state.borrow_mut().rows = cached;
+            rebuild_rows(&app, &tray, &actions, &state, &loc);
+        }
+    }
+
+    // ---- Initial preflight (background) ----
+    // Sets app-state from the probe; the pump kicks the first load only when
+    // the environment is ready (CLI present + logged in).
+    {
+        let pf_tx = pf_tx.clone();
+        std::thread::spawn(move || {
+            let _ = pf_tx.send(devtunnel::preflight());
+        });
+    }
 
     // Start minimized to tray: never call `show()`, just run the event loop.
     // The window appears via tray icon click or the "Open window" menu item.
@@ -626,7 +950,11 @@ fn open_browser(url: &str) {
 /// Fires the fetch on a background thread; the result comes back via `Sender`.
 fn load_async(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
+    tx: &Sender<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>,
     loc: &Rc<Locale>,
 ) {
     if let Some(a) = weak.upgrade() {
@@ -636,7 +964,7 @@ fn load_async(
     let lang = locale::system_locale();
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
-        let _ = tx.send((None, devtunnel::fetch_rows(&loc)));
+        let _ = tx.send((None, None, devtunnel::fetch_rows(&loc)));
     });
 }
 
@@ -644,12 +972,18 @@ fn load_async(
 /// The op's success feeds straight into `fetch_rows`, so the same `apply_rows`
 /// path reconciles the UI (and tray) from the service after every mutation.
 /// `placeholder` is the id of an optimistic placeholder row to remove when done.
+/// `hidden_key` is the hidden-delete key to clear when the op settles.
 fn run_op_async<F>(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
+    tx: &Sender<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>,
     status_key: &str,
     loc: &Rc<Locale>,
     placeholder: Option<u64>,
+    hidden_key: Option<(String, Option<i32>)>,
     op: F,
 ) where
     F: FnOnce(&Locale) -> anyhow::Result<()> + Send + 'static,
@@ -662,26 +996,35 @@ fn run_op_async<F>(
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
         let result = op(&loc).and_then(|()| devtunnel::fetch_rows(&loc));
-        let _ = tx.send((placeholder, result));
+        let _ = tx.send((placeholder, hidden_key, result));
     });
 }
 
 /// Applies a load result: fills the list and rebuilds the tray menu.
-/// Always runs on the UI thread (called by the timer).
+/// Always runs on the UI thread (called by the timer). Returns `true` when the
+/// load succeeded (used to trigger the one-shot auto-resume).
 fn apply_rows(
     weak: &slint::Weak<AppWindow>,
     tray: &tray_icon::TrayIcon,
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
     state: &Rc<RefCell<LiveState>>,
     placeholder_id: Option<u64>,
+    hidden_key: Option<(String, Option<i32>)>,
     result: anyhow::Result<Vec<devtunnel::Row>>,
     loc: &Rc<Locale>,
-) {
-    let Some(app) = weak.upgrade() else { return };
+) -> bool {
+    let Some(app) = weak.upgrade() else {
+        return false;
+    };
 
     // Remove the optimistic placeholder whether the op succeeded or failed.
     if let Some(id) = placeholder_id {
         state.borrow_mut().remove_placeholder(id);
+    }
+
+    // Clear the hidden-delete key on both success and error so the row is restored on failure.
+    if let Some(ref key) = hidden_key {
+        state.borrow_mut().unhide_delete(key);
     }
 
     match result {
@@ -706,19 +1049,30 @@ fn apply_rows(
 
             // Cache the load and rebuild the row model (status/host-state derived
             // from the latest probe/host events), then refresh probe targets.
+            // Also persist the rows so the next startup paints immediately.
+            state::save_row_cache(&rows);
             state.borrow_mut().rows = rows;
             rebuild_rows(&app, tray, actions, state, loc);
 
             let mut args = FluentArgs::new();
             args.set("count", count as i64);
             app.set_status(loc.t_args("status-port-count", &args).into());
+            true
         }
         Err(e) => {
-            // Rebuild so that the removed placeholder is no longer shown.
+            // Rebuild so that the removed placeholder / restored hidden row is reflected.
             rebuild_rows(&app, tray, actions, state, loc);
+            let msg = e.to_string();
+            // Login expiry during management switches the app into the
+            // re-login state (banner + warning tray icon).
+            if devtunnel::is_auth_error(&msg) {
+                app.set_app_state("relogin".into());
+                update_tray_icon(tray, "relogin");
+            }
             let mut args = FluentArgs::new();
-            args.set("message", e.to_string());
+            args.set("message", msg);
             app.set_status(loc.t_args("status-error", &args).into());
+            false
         }
     }
 }
@@ -736,13 +1090,25 @@ fn rebuild_rows(
     loc: &Rc<Locale>,
 ) {
     let st = state.borrow();
+    // Build a flat index space first: every visible (non-hidden) real port gets a
+    // stable `row-index` used to key the expandable detail panel (issue #17). The
+    // same index drives `selected-index` so the open panel survives reloads.
+    // Optimistic delete (#13) hides ports/groups awaiting their confirming refresh.
+    let visible_rows: Vec<&devtunnel::Row> = st
+        .rows
+        .iter()
+        .filter(|r| {
+            !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+        })
+        .collect();
 
     // Fold the flat rows into groups (Real Tunnel ID order preserved). Ports are
     // collected separately and attached as models at the end.
     let mut groups: Vec<GroupView> = Vec::new();
     let mut ports: Vec<Vec<PortView>> = Vec::new();
     let mut index: HashMap<String, usize> = HashMap::new();
-    for r in &st.rows {
+    for (flat_idx, r) in visible_rows.iter().enumerate() {
         let gi = match index.get(&r.tunnel_id) {
             Some(&i) => i,
             None => {
@@ -751,7 +1117,10 @@ fn rebuild_rows(
                     group: r.group.clone().into(),
                     tunnel_id: r.tunnel_id.clone().into(),
                     expiration: r.expiration.clone().into(),
-                    hosting: derive_host_state(&st, &r.tunnel_id) == "hosting",
+                    hosting: derive_host_state(&st, &r.tunnel_id, r.host_connections) == "hosting",
+                    // "Hosted elsewhere" pill: service reports connections but this
+                    // session is not hosting the group (issue #15).
+                    host_state: derive_host_state(&st, &r.tunnel_id, r.host_connections).into(),
                     provisioning: false,
                     has_port: false,
                     ports: ModelRc::default(),
@@ -767,21 +1136,24 @@ fn rebuild_rows(
                 port: r.port,
                 protocol: r.protocol.clone().into(),
                 url: r.url.clone().into(),
-                status: derive_status(&st, &r.tunnel_id, r.port).into(),
+                status: derive_status(&st, &r.tunnel_id, r.port, r.host_connections).into(),
+                row_index: flat_idx as i32,
             });
         }
     }
 
     // Optimistic placeholders for in-flight creates: attach the provisioning
     // port to its existing group (matched by friendly name) when possible,
-    // otherwise add a whole provisioning card.
+    // otherwise add a whole provisioning card. Placeholders are inert, so they
+    // carry row-index -1 (not expandable).
     for p in &st.placeholders {
         match groups.iter().position(|g| g.group == p.group.as_str()) {
             Some(gi) if p.port != 0 => ports[gi].push(PortView {
                 port: p.port,
                 protocol: p.protocol.clone().into(),
                 url: SharedString::new(),
-                status: "provisioning".into(),
+                status: PROVISIONING_STATUS.into(),
+                row_index: -1,
             }),
             _ => {
                 groups.push(GroupView {
@@ -789,6 +1161,7 @@ fn rebuild_rows(
                     tunnel_id: SharedString::new(),
                     expiration: SharedString::new(),
                     hosting: false,
+                    host_state: SharedString::new(),
                     provisioning: true,
                     has_port: p.port != 0,
                     ports: ModelRc::default(),
@@ -798,7 +1171,8 @@ fn rebuild_rows(
                         port: p.port,
                         protocol: p.protocol.clone().into(),
                         url: SharedString::new(),
-                        status: "provisioning".into(),
+                        status: PROVISIONING_STATUS.into(),
+                        row_index: -1,
                     }]
                 } else {
                     Vec::new()
@@ -810,12 +1184,104 @@ fn rebuild_rows(
         g.ports = ModelRc::new(VecModel::from(pv));
     }
 
+    // Recompute the expanded port's flat index: rows can reorder or disappear
+    // across reloads, so the selection is keyed by (tunnel_id, port), not index.
+    let mut selected = -1;
+    let mut stale_detail = false;
+    if let Some((tid, port)) = st.detail.as_ref() {
+        match visible_rows
+            .iter()
+            .position(|r| r.tunnel_id == tid.as_str() && r.port == *port)
+        {
+            Some(i) => selected = i as i32,
+            None => stale_detail = true,
+        }
+    }
+
     // Rebuild the tray menu with per-port actions from the same load (placeholders
     // have no URL, so they are skipped by build_tray_menu).
     let menu = build_tray_menu(&st.rows, &mut actions.borrow_mut(), loc);
     tray.set_menu(Some(Box::new(menu)));
 
+    app.set_selected_index(selected);
     app.set_groups(ModelRc::new(VecModel::from(groups)));
+
+    // The selected port no longer exists (deleted elsewhere): collapse so the
+    // poll timer stops issuing CLI calls for it.
+    drop(st);
+    if stale_detail {
+        state.borrow_mut().detail = None;
+    }
+}
+
+/// Fires a `fetch_port_status` for the selected port on a background thread;
+/// the tagged result comes back via the metrics channel drained in the pump.
+fn spawn_metrics_fetch(
+    tx: &Sender<(String, i32, anyhow::Result<devtunnel::PortMetrics>)>,
+    tunnel_id: String,
+    port: i32,
+) {
+    let tx = tx.clone();
+    let lang = locale::system_locale();
+    std::thread::spawn(move || {
+        let loc = Locale::load(&lang);
+        let result = devtunnel::fetch_port_status(&tunnel_id, port, &loc);
+        let _ = tx.send((tunnel_id, port, result));
+    });
+}
+
+/// Formats a byte count as a short human-readable value (e.g. "1.5 MB").
+/// Unit symbols are technical notation, intentionally not localized.
+fn human_bytes(v: f64) -> String {
+    const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = v.max(0.0);
+    let mut unit = 0;
+    while v >= 1024.0 && unit < UNITS.len() - 1 {
+        v /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", v as u64, UNITS[unit])
+    } else {
+        format!("{:.1} {}", v, UNITS[unit])
+    }
+}
+
+/// Pushes a metrics result into the detail panel. `None` (no data yet, fetch
+/// error, or CLI without the status block) renders every field as "n/a".
+fn apply_metrics(app: &AppWindow, metrics: Option<&devtunnel::PortMetrics>, loc: &Locale) {
+    let na = loc.t("metric-na");
+    let total = |v: Option<f64>| -> SharedString {
+        v.map(human_bytes).unwrap_or_else(|| na.clone()).into()
+    };
+    let rate = |v: Option<f64>| -> SharedString {
+        v.map(|b| {
+            let mut args = FluentArgs::new();
+            args.set("value", human_bytes(b));
+            loc.t_args("metric-rate-per-second", &args)
+        })
+        .unwrap_or_else(|| na.clone())
+        .into()
+    };
+    let count = |v: Option<f64>| -> SharedString {
+        v.map(|c| (c as i64).to_string())
+            .unwrap_or_else(|| na.clone())
+            .into()
+    };
+    app.set_detail_upload_total(total(metrics.and_then(|m| m.upload_total)));
+    app.set_detail_upload_rate(rate(metrics.and_then(|m| m.upload_rate)));
+    app.set_detail_download_total(total(metrics.and_then(|m| m.download_total)));
+    app.set_detail_download_rate(rate(metrics.and_then(|m| m.download_rate)));
+    app.set_detail_connections(count(metrics.and_then(|m| m.connection_count)));
+}
+
+/// Refreshes the Logs tab model from the capture ring buffer (oldest first).
+fn refresh_logs(app: &AppWindow) {
+    let lines: Vec<SharedString> = logbuf::snapshot()
+        .into_iter()
+        .map(SharedString::from)
+        .collect();
+    app.set_detail_logs(ModelRc::new(VecModel::from(lines)));
 }
 
 /// Builds the tray menu: "Open window", one submenu per port with URL actions
@@ -864,6 +1330,8 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_btn_refresh(loc.t("btn-refresh").into());
     s.set_btn_new_group(loc.t("btn-new-group").into());
     s.set_btn_add_port(loc.t("btn-add-port").into());
+    s.set_btn_settings(loc.t("btn-settings").into());
+
     s.set_no_url(loc.t("no-url").into());
     s.set_expires_label(loc.t("expires-label").into());
     s.set_btn_copy(loc.t("btn-copy").into());
@@ -878,6 +1346,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_badge_service_down(loc.t("badge-service-down").into());
     s.set_badge_down(loc.t("badge-down").into());
     s.set_badge_provisioning(loc.t("badge-provisioning").into());
+    s.set_badge_hosted_external(loc.t("badge-hosted-external").into());
     s.set_btn_del_port(loc.t("btn-del-port").into());
     s.set_btn_del_group(loc.t("btn-del-group").into());
 
@@ -913,6 +1382,26 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_ph_expiration(loc.t("ph-expiration").into());
     s.set_ph_description(loc.t("ph-description").into());
 
+    // Port detail panel
+    s.set_tab_metrics(loc.t("tab-metrics").into());
+    s.set_tab_logs(loc.t("tab-logs").into());
+    s.set_metric_upload(loc.t("metric-upload").into());
+    s.set_metric_download(loc.t("metric-download").into());
+    s.set_metric_total(loc.t("metric-total").into());
+    s.set_metric_rate(loc.t("metric-rate").into());
+    s.set_metric_connections(loc.t("metric-connections").into());
+    s.set_metric_active(loc.t("metric-active").into());
+    s.set_metric_na(loc.t("metric-na").into());
+    s.set_logs_empty(loc.t("logs-empty").into());
+
+    // Preflight banner / re-login
+    s.set_banner_cli_missing_title(loc.t("banner-cli-missing-title").into());
+    s.set_banner_cli_missing_body(loc.t("banner-cli-missing-body").into());
+    s.set_banner_cli_missing_install(loc.t("banner-cli-missing-install").into());
+    s.set_banner_relogin_title(loc.t("banner-relogin-title").into());
+    s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
+    s.set_btn_sign_in(loc.t("btn-sign-in").into());
+
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());
     s.set_field_group(loc.t("field-group").into());
@@ -920,6 +1409,15 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_protocol(loc.t("field-protocol").into());
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
+
+    // Settings
+    s.set_settings_title(loc.t("settings-title").into());
+    s.set_field_auto_start(loc.t("field-auto-start").into());
+    s.set_field_probe_interval(loc.t("field-probe-interval").into());
+    s.set_btn_close(loc.t("btn-close").into());
+
+    // Re-login
+    s.set_relogin_message(loc.t("relogin-message").into());
 }
 
 #[cfg(test)]
@@ -948,6 +1446,17 @@ mod tests {
     }
 
     #[test]
+    fn human_bytes_scales_units() {
+        assert_eq!(human_bytes(0.0), "0 B");
+        assert_eq!(human_bytes(512.0), "512 B");
+        assert_eq!(human_bytes(1024.0), "1.0 KB");
+        assert_eq!(human_bytes(1536.0), "1.5 KB");
+        assert_eq!(human_bytes(5.0 * 1024.0 * 1024.0), "5.0 MB");
+        // Negative values clamp to zero instead of underflowing.
+        assert_eq!(human_bytes(-3.0), "0 B");
+    }
+
+    #[test]
     fn placeholder_row_is_provisioning() {
         let mut st = make_state();
         // One real row
@@ -958,24 +1467,148 @@ mod tests {
             protocol: "http".into(),
             url: "https://example.com".into(),
             expiration: "30d".into(),
+            host_connections: 0,
         });
 
         // No placeholder yet — only one row, status derives to "idle".
-        let real_row_status = derive_status(&st, "tid1", 9000);
+        let real_row_status = derive_status(&st, "tid1", 9000, 0);
         assert_eq!(real_row_status, "idle");
 
-        // Push a placeholder and check it appears as a "provisioning" row.
+        // Push a placeholder; its fields are what `rebuild_rows` turns into a row.
         let id = st.push_placeholder("new-group".into(), 4000, "tcp".into());
         assert_eq!(st.placeholders.len(), 1);
         assert_eq!(st.placeholders[0].port, 4000);
+        assert_eq!(st.placeholders[0].group, "new-group");
+        assert_eq!(st.placeholders[0].protocol, "tcp");
 
-        // The row derived from the placeholder should use status "provisioning".
-        let prow_status = "provisioning"; // as assigned in rebuild_rows
-        assert_eq!(prow_status, "provisioning");
+        // `rebuild_rows` assigns this id to every placeholder row, which the
+        // theme/UI render as the "Provisioning…" badge.
+        assert_eq!(PROVISIONING_STATUS, "provisioning");
 
         // After removal the placeholder list is empty again.
         st.remove_placeholder(id);
         assert!(st.placeholders.is_empty());
+    }
+
+    #[test]
+    fn derive_host_state_session_hosting_wins_over_service_count() {
+        let mut st = make_state();
+        st.host.insert("t1".into(), "hosting".into());
+        // Even with host_connections > 0, this-session state returns "hosting".
+        assert_eq!(derive_host_state(&st, "t1", 3), "hosting");
+    }
+
+    #[test]
+    fn derive_host_state_session_connecting_wins_over_service_count() {
+        let mut st = make_state();
+        st.host.insert("t1".into(), "host".into());
+        assert_eq!(derive_host_state(&st, "t1", 1), "hosting");
+    }
+
+    #[test]
+    fn derive_host_state_external_when_service_has_connections() {
+        let st = make_state();
+        // No entry in st.host (this session is not hosting), but service reports connections.
+        assert_eq!(derive_host_state(&st, "t1", 2), "external");
+    }
+
+    #[test]
+    fn derive_host_state_idle_when_no_connections() {
+        let st = make_state();
+        assert_eq!(derive_host_state(&st, "t1", 0), "");
+    }
+
+    #[test]
+    fn derive_status_session_hosting_wins() {
+        let mut st = make_state();
+        st.host.insert("t1".into(), "hosting".into());
+        assert_eq!(derive_status(&st, "t1", 3000, 0), "host");
+    }
+
+    #[test]
+    fn derive_status_external_host_connections_gives_host_color() {
+        let st = make_state();
+        // service says hosted externally — dot should use "host" color
+        assert_eq!(derive_status(&st, "t1", 3000, 1), "host");
+    }
+
+    #[test]
+    fn derive_status_zero_connections_is_idle() {
+        let st = make_state();
+        assert_eq!(derive_status(&st, "t1", 3000, 0), "idle");
+    }
+
+    fn make_row(tunnel_id: &str, port: i32) -> devtunnel::Row {
+        devtunnel::Row {
+            group: tunnel_id.to_string(),
+            tunnel_id: tunnel_id.to_string(),
+            port,
+            protocol: "http".into(),
+            url: "https://example.com".into(),
+            expiration: "30d".into(),
+            host_connections: 0,
+        }
+    }
+
+    #[test]
+    fn hidden_delete_insert_remove() {
+        let mut st = make_state();
+
+        let key1 = st.hide_delete("tid1".into(), Some(3000));
+        let key2 = st.hide_delete("tid2".into(), None);
+        assert_eq!(st.hidden.len(), 2);
+        assert!(st.hidden.contains(&("tid1".to_string(), Some(3000))));
+        assert!(st.hidden.contains(&("tid2".to_string(), None)));
+
+        st.unhide_delete(&key1);
+        assert_eq!(st.hidden.len(), 1);
+        assert!(!st.hidden.contains(&("tid1".to_string(), Some(3000))));
+
+        st.unhide_delete(&key2);
+        assert!(st.hidden.is_empty());
+    }
+
+    #[test]
+    fn hidden_port_excludes_matching_row() {
+        let mut st = make_state();
+        st.rows.push(make_row("tid1", 3000));
+        st.rows.push(make_row("tid1", 8080));
+
+        // Hide the port-3000 row; port-8080 should still be visible.
+        st.hide_delete("tid1".into(), Some(3000));
+
+        let visible: Vec<_> = st
+            .rows
+            .iter()
+            .filter(|r| {
+                !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                    && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+            })
+            .collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].port, 8080);
+    }
+
+    #[test]
+    fn hidden_group_excludes_all_ports() {
+        let mut st = make_state();
+        st.rows.push(make_row("tid1", 3000));
+        st.rows.push(make_row("tid1", 8080));
+        st.rows.push(make_row("tid2", 9000));
+
+        // Hide the entire group tid1; tid2's row should remain.
+        st.hide_delete("tid1".into(), None);
+
+        let visible: Vec<_> = st
+            .rows
+            .iter()
+            .filter(|r| {
+                !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                    && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+            })
+            .collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].tunnel_id, "tid2");
     }
 }
 
@@ -988,4 +1621,37 @@ fn build_icon() -> Icon {
     }
     // String literal kept here intentionally: build_icon() runs before Locale is loaded.
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Solid amber 32×32 warning icon shown while the app is not "ready"
+/// (CLI missing / re-login required).
+fn build_warning_icon() -> Icon {
+    const SIZE: u32 = 32;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for _ in 0..(SIZE * SIZE) {
+        rgba.extend_from_slice(&[0xf5, 0x9e, 0x0b, 0xff]); // amber
+    }
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Swaps the tray icon to match the app-level preflight state: the normal blue
+/// icon when "ready", the warning variant otherwise.
+fn update_tray_icon(tray: &tray_icon::TrayIcon, app_state: &str) {
+    let icon = if app_state == "ready" {
+        build_icon()
+    } else {
+        build_warning_icon()
+    };
+    let _ = tray.set_icon(Some(icon));
+}
+
+/// Fires the one-shot Windows toast for the re-login case (no toasts for any
+/// other status change). Best-effort: a toast failure is not worth surfacing.
+#[cfg(windows)]
+fn show_relogin_toast(loc: &Locale) {
+    use tauri_winrt_notification::Toast;
+    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
+        .title(&loc.t("toast-relogin-title"))
+        .text1(&loc.t("toast-relogin-body"))
+        .show();
 }
