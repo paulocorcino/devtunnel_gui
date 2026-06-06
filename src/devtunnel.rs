@@ -9,7 +9,9 @@ use fluent_bundle::FluentArgs;
 use serde::de::DeserializeOwned;
 use std::process::Command;
 
-/// A flattened port with its URL, ready for the UI.
+/// A flattened port with its URL, ready for the UI. Serde derives support the
+/// startup row cache (`state::save_row_cache` / `state::load_row_cache`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Row {
     /// Friendly group name (falls back to tunnel_id when the tunnel has no name).
     pub group: String,
@@ -71,6 +73,7 @@ pub fn is_auth_error(stderr: &str) -> bool {
     const NEEDLES: &[&str] = &[
         "unauthorized",
         "not logged in",
+        "login required",
         "login expired",
         "login has expired",
         "authentication failed",
@@ -83,7 +86,11 @@ pub fn is_auth_error(stderr: &str) -> bool {
         "403",
     ];
     let lower = stderr.to_ascii_lowercase();
-    NEEDLES.iter().any(|n| lower.contains(n))
+    if NEEDLES.iter().any(|n| lower.contains(n)) {
+        return true;
+    }
+    // A token reported as invalid/revoked is also an auth failure.
+    lower.contains("token") && (lower.contains("invalid") || lower.contains("revoked"))
 }
 
 /// Runs `devtunnel user login` (interactive — opens the system browser) and
@@ -447,5 +454,53 @@ mod tests {
     fn empty_when_no_valid_chars() {
         assert_eq!(sanitize_tunnel_id("@@@"), "");
         assert_eq!(sanitize_tunnel_id("   "), "");
+    }
+
+    // ---- is_auth_error: representative CLI auth-failure messages ----
+
+    #[test]
+    fn auth_error_on_not_logged_in() {
+        assert!(is_auth_error(
+            "Not logged in. Run 'devtunnel user login' to log in."
+        ));
+    }
+
+    #[test]
+    fn auth_error_on_login_required_hint() {
+        assert!(is_auth_error(
+            "error: Login required. Please run `devtunnel user login`."
+        ));
+    }
+
+    #[test]
+    fn auth_error_on_unauthorized() {
+        assert!(is_auth_error("The request was rejected: 401 Unauthorized."));
+    }
+
+    #[test]
+    fn auth_error_on_expired_or_revoked_token() {
+        assert!(is_auth_error(
+            "Authentication failed: the access token has expired."
+        ));
+        assert!(is_auth_error("error: token is invalid or revoked"));
+    }
+
+    #[test]
+    fn auth_error_matches_wrapped_localized_error() {
+        // The engine sees the localized wrapper (err-cli-failed) around the raw
+        // stderr; the classifier must still hit on the embedded CLI text.
+        assert!(is_auth_error(
+            "`devtunnel token x --scopes host -j` returned error: Not logged in. Run 'devtunnel user login'."
+        ));
+    }
+
+    #[test]
+    fn not_auth_error_on_other_errors() {
+        assert!(!is_auth_error("connection timed out"));
+        assert!(!is_auth_error(
+            "tunnel id has no cluster suffix (expected 'id.cluster'): foo"
+        ));
+        assert!(!is_auth_error("port number must be between 1 and 65535"));
+        assert!(!is_auth_error("503 Service Unavailable"));
     }
 }
