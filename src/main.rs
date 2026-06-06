@@ -591,6 +591,8 @@ fn main() -> anyhow::Result<()> {
                 }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
+                // Tracks whether at least one *successful* load landed this tick;
+                // a failed first fetch must not consume the one-shot auto-resume.
                 let mut load_ok = false;
                 while let Ok((placeholder_id, hidden_key, result)) = rx.try_recv() {
                     if apply_rows(
