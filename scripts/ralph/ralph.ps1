@@ -1,24 +1,25 @@
 #requires -Version 7
 <#
 .SYNOPSIS
-    Ralph runner (Windows): work GitHub issues labelled "AFK" overnight, one PR
-    per issue, on your Claude subscription quota (no Anthropic API key).
+    Ralph runner (Windows): work GitHub issues labelled "AFK" overnight onto a
+    SINGLE run branch, on your Claude subscription quota (no Anthropic API key).
 
 .DESCRIPTION
+    * One branch per RUN: the runner creates `afk/run-<stamp>` from a base you
+      choose (-BaseBranch, default origin/main) in a throwaway worktree, then
+      works the AFK queue in order, committing every issue onto that same
+      branch. At the end you have ONE branch to review and merge back into the
+      base by hand. The runner never pushes and never opens a PR.
     * PLAN with `claude -p` (prompt piped via stdin) -> .ralph/plan.md.
-    * EXECUTE by looping `claude -p` (headless, self-terminating). A single -p
-      call runs the whole agentic session in one warm context (same token
-      economy as an interactive session) and exits on its own; the runner reads
-      RALPH_DONE_EXIT / RALPH_BLOCKED_EXIT from its output to classify the
-      outcome. The loop is only a safety net for issues too big for one call —
-      progress is tracked on disk (plan.md checkboxes + git commits), so a
-      second call resumes where the first stopped.
-    * GitHub-native: queue from `gh issue list --label AFK`; deliver via a
-      branch + `gh pr create` (never merges). Idempotent on open PRs, so an
-      incomplete issue is resumed rather than skipped.
-    * Subscription-friendly: no USD cap (no API spend). On a rate/usage limit
-      the runner parses the reset time and schedules a re-run via a detached
-      PowerShell process.
+    * EXECUTE by looping `claude -p` (headless, self-terminating) or an
+      interactive session. The runner reads RALPH_DONE_EXIT / RALPH_BLOCKED_EXIT
+      from the output to classify each issue's outcome.
+    * Stop-at-first-block: the moment an issue does NOT finish green (block,
+      timeout, stuck, usage limit), the run stops and hands you the branch as
+      it stands. Completed issues stay committed; the stalled issue's partial
+      commits are left in place for you to inspect.
+    * Subscription-friendly: no USD cap (no API spend). A usage limit is treated
+      as a stop — the runner reports the reset time and you re-run manually.
 
     Hooks (guard deny-list) are injected via --settings, scoped to the runner;
     your global ~/.claude/settings.json is never touched.
@@ -26,9 +27,9 @@
 .EXAMPLE
     pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13 -DryRun       # plan only
 .EXAMPLE
-    pwsh -File scripts/ralph/ralph.ps1 -OnlyIssue 13 -NoPublish    # exec, no PR
-.EXAMPLE
     pwsh -File scripts/ralph/ralph.ps1 -DeadlineHours 8            # overnight
+.EXAMPLE
+    pwsh -File scripts/ralph/ralph.ps1 -BaseBranch feature/x       # cut from a branch
 #>
 [CmdletBinding()]
 param(
@@ -58,14 +59,14 @@ param(
     # Work only this issue number.
     [int]$OnlyIssue = 0,
 
-    # Plan only; do not execute, push, or open PRs.
+    # Base the run branch is cut from (and that you merge it back into by hand).
+    # Any commit-ish: a remote-tracking branch (origin/main), a local branch, a
+    # tag, or a SHA. Defaults to origin/main.
+    [string]$BaseBranch = 'origin/main',
+
+    # Plan only; do not execute. The run branch is still created so you can
+    # inspect the plans, but no source changes are made.
     [switch]$DryRun,
-
-    # Execute + commit locally, but do NOT push or open a PR (validation).
-    [switch]$NoPublish,
-
-    # Disable scheduling a re-run when a rate/usage limit is hit.
-    [switch]$NoResume,
 
     # Execute via headless `claude -p` loop instead of an interactive session.
     # Default is INTERACTIVE (cheaper on a subscription — headless -p is metered
@@ -90,16 +91,14 @@ $null = (Get-Command gh -ErrorAction Stop)
 
 $RunStamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $RunDir   = Join-Path $ScriptDir "runs\$RunStamp"
-# Worktrees live OUTSIDE the repo (a sibling dir): their files must not contain
-# "/scripts/ralph/" in their path, or guard.ps1's tooling-protection rule would
-# block the agent from editing the issue's own source.
+# The run worktree lives OUTSIDE the repo (a sibling dir): its files must not
+# contain "/scripts/ralph/" in their path, or guard.ps1's tooling-protection
+# rule would block the agent from editing an issue's own source.
 $WtRoot   = Join-Path (Split-Path $RepoRoot -Parent) '.ralph-worktrees'
-$StateDir = Join-Path $ScriptDir 'state'        # survives across runs (plan cache)
-New-Item -ItemType Directory -Force -Path $RunDir, $WtRoot, $StateDir | Out-Null
+New-Item -ItemType Directory -Force -Path $RunDir, $WtRoot | Out-Null
 
 $Deadline = (Get-Date).AddHours($DeadlineHours)
 $LogFile  = Join-Path $RunDir 'ralph.log'
-$script:HaltForResume = $false
 $script:LimitText = ''
 
 function Log([string]$msg) {
@@ -131,12 +130,6 @@ $Settings | ConvertTo-Json -Depth 8 | Set-Content -Path $SettingsPath -Encoding 
 $env:ANTHROPIC_API_KEY = ''
 
 # --- Helpers ------------------------------------------------------------------
-function New-Slug([string]$title) {
-    $s = $title.ToLowerInvariant() -replace '[^a-z0-9]+', '-' -replace '(^-+|-+$)', ''
-    if ($s.Length -gt 40) { $s = $s.Substring(0, 40).TrimEnd('-') }
-    return $s
-}
-
 function Get-OpenSteps([string]$PlanPath) {
     if (-not (Test-Path $PlanPath)) { return -1 }
     # @() so an empty match set yields 0, not a StrictMode "Count not found" crash.
@@ -153,6 +146,20 @@ function Get-RecommendedModel([string]$PlanPath) {
 
 function Test-LimitText([string]$text) {
     return [bool]($text -match '(?i)(rate limit|usage limit|reached your .* limit|limit reached|resets\s+\d)')
+}
+
+# Best-effort parse of a usage-limit reset time, for the stop report only.
+function Get-ResetDateTime([string]$text) {
+    $m = [regex]::Match($text, 'resets\s+(?:([A-Za-z]{3})\s+)?(\d{1,2}:\d{2}\s*[ap]m)', 'IgnoreCase')
+    if (-not $m.Success) { return $null }
+    $timeStr = $m.Groups[2].Value -replace '\s', ''
+    $t = [regex]::Match($timeStr, '(\d{1,2}):(\d{2})([ap]m)', 'IgnoreCase')
+    if (-not $t.Success) { return $null }
+    $hour = [int]$t.Groups[1].Value; $min = [int]$t.Groups[2].Value; $ap = $t.Groups[3].Value.ToLower()
+    if ($ap -eq 'pm' -and $hour -ne 12) { $hour += 12 } elseif ($ap -eq 'am' -and $hour -eq 12) { $hour = 0 }
+    $reset = (Get-Date).Date.AddHours($hour).AddMinutes($min)
+    if ($reset -le (Get-Date)) { $reset = $reset.AddDays(1) }
+    return $reset
 }
 
 # PLAN: one-shot `claude -p`, prompt piped via STDIN (a positional prompt is
@@ -184,7 +191,7 @@ function Invoke-ExecCall {
     return $true
 }
 
-# EXECUTE loop: run -p calls until DONE / BLOCKED / stuck / timeout / cap.
+# EXECUTE loop (headless): run -p calls until DONE / BLOCKED / stuck / timeout / cap.
 function Invoke-ExecLoop {
     param([string]$Cwd, [string]$PlanPath, [string]$IssueRun, [string]$PromptFile, [string]$Model)
     $issueDeadline = (Get-Date).AddMinutes($MaxMinutesPerIssue)
@@ -203,7 +210,7 @@ function Invoke-ExecLoop {
         $did  = $before -ne $after
         Log "    exec call ${i}: exited=$exited open=$open committed=$did"
 
-        if (Test-LimitText $out) { return 'limit' }
+        if (Test-LimitText $out) { $script:LimitText = $out; return 'limit' }
         if (-not $exited)        { return 'timeout' }
 
         $m = [regex]::Match($out, 'RALPH_BLOCKED_EXIT\s*(.*)')
@@ -261,211 +268,133 @@ function Get-LatestTranscript {
     return $null
 }
 
-# --- Rate-limit reset parsing + re-run scheduling -----------------------------
-function Get-ResetDateTime([string]$text) {
-    $m = [regex]::Match($text, 'resets\s+(?:([A-Za-z]{3})\s+)?(\d{1,2}:\d{2}\s*[ap]m)', 'IgnoreCase')
-    if (-not $m.Success) { return $null }
-    $timeStr = $m.Groups[2].Value -replace '\s', ''
-    $t = [regex]::Match($timeStr, '(\d{1,2}):(\d{2})([ap]m)', 'IgnoreCase')
-    if (-not $t.Success) { return $null }
-    $hour = [int]$t.Groups[1].Value; $min = [int]$t.Groups[2].Value; $ap = $t.Groups[3].Value.ToLower()
-    if ($ap -eq 'pm' -and $hour -ne 12) { $hour += 12 } elseif ($ap -eq 'am' -and $hour -eq 12) { $hour = 0 }
-    $reset = (Get-Date).Date.AddHours($hour).AddMinutes($min)
-    if ($reset -le (Get-Date)) { $reset = $reset.AddDays(1) }
-    return $reset
-}
-
-function Schedule-Rerun([datetime]$ResetDt) {
-    if ($NoResume) { return }
-    $retry = $ResetDt.AddMinutes(5)
-    $wait  = [int][math]::Max(60, ($retry - (Get-Date)).TotalSeconds)
-    $tail  = if ($NoPublish) { ' -NoPublish' } else { '' }
-    $cmd   = "Start-Sleep -Seconds $wait; & pwsh -NoProfile -File `"$PSCommandPath`" -DeadlineHours $DeadlineHours -ExecModel $ExecModel -ExecEffort $ExecEffort$tail"
-    Start-Process pwsh -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-Command', $cmd | Out-Null
-    Log "  LIMIT: resets $($ResetDt.ToString('HH:mm')) -> re-run scheduled at $($retry.ToString('HH:mm')) (sleeps ${wait}s)."
-}
-
-# --- Publish ------------------------------------------------------------------
-function Publish-Result {
-    param([int]$IssueNum, [string]$Title, [string]$Branch, [string]$Wt, [string]$Status)
-    $commits = (git -C $Wt rev-list --count "origin/main..HEAD").Trim()
-    Log "  result: status=$Status commits=$commits"
-
-    if ($NoPublish) {
-        Log "  [NoPublish] not pushing. Branch '$Branch' kept at $Wt with $commits commit(s)."
-        if ([int]$commits -gt 0) { (git -C $Wt log --oneline "origin/main..HEAD") | ForEach-Object { Log "    $_" } }
-        return
-    }
-
-    # Open a PR ONLY when the agent explicitly finished (DONE).
-    if ($Status -ne 'DONE') {
-        if ($Status -like 'BLOCKED*') {
-            # Explicit block: Claude decided it can't proceed autonomously. Hand
-            # it to a human with the HITL label (created on demand) — the queue
-            # skips HITL issues, so it is not retried until a human clears it.
-            $reason = ($Status -replace '^BLOCKED', '').Trim()
-            gh label create HITL --color B60205 --description "Needs a human (Ralph blocked)" 2>$null | Out-Null
-            gh issue edit $IssueNum --add-label HITL 2>&1 | Out-Null
-            gh issue comment $IssueNum --body "Ralph: blocked — $reason. Labelled **HITL**; will not retry until a human resolves it." | Out-Null
-            Log "  blocked -> labelled #$IssueNum HITL"
-        } else {
-            # Timeout / incomplete session: transient. Keep AFK and resume next run.
-            $note = if ([int]$commits -gt 0) { " $commits local commit(s) kept on '$Branch' for resume." } else { '' }
-            gh issue comment $IssueNum --body "Ralph: did not finish ($Status). No PR opened.$note Will resume on the next run." | Out-Null
-        }
-        return
-    }
-    if ([int]$commits -le 0) {
-        gh issue comment $IssueNum --body "Ralph: reported DONE but produced no commits — nothing to open a PR with." | Out-Null
-        return
-    }
-
-    git -C $Wt push -u origin $Branch --quiet
-    $body = @"
-Autonomous Ralph PR for issue #$IssueNum ($commits commit(s)).
-
-Closes #$IssueNum
-
-> Generated overnight on the subscription quota. Review before merging.
-"@
-    $pr = gh pr create --base main --head $Branch --title "$Title (#$IssueNum)" --body $body 2>&1
-    Log "  PR: $pr"
-    gh issue comment $IssueNum --body "Ralph: DONE — opened $pr ($commits commits)." | Out-Null
-}
-
-# --- Run one issue end to end -------------------------------------------------
+# --- Run one issue onto the shared run branch ---------------------------------
+# Plans, then executes, committing onto $Wt's current branch. Returns the
+# outcome string. 'DONE' means the issue finished green; anything else stops the
+# run (caller's decision). 'infeasible'/'dryrun' are non-fatal skips.
 function Invoke-Issue {
-    param([int]$IssueNum, [string]$Title, [switch]$StagedPlan)
+    param([int]$IssueNum, [string]$Title, [string]$Wt, [switch]$StagedPlan)
 
     $issueRun = Join-Path $RunDir "issue-$IssueNum"
     New-Item -ItemType Directory -Force -Path $issueRun | Out-Null
     Log "=== #$IssueNum  $Title"
 
-    # Reuse an existing afk/<n>-* branch (resume an incomplete issue) or start fresh.
-    $remoteBranch = (git ls-remote --heads origin "afk/$IssueNum-*" 2>$null | ForEach-Object { ($_ -split '\s+')[1] -replace '^refs/heads/', '' } | Select-Object -First 1)
-    $localBranch  = (git branch --list "afk/$IssueNum-*" | ForEach-Object { $_.TrimStart('* ').Trim() } | Select-Object -First 1)
-    $branch = $remoteBranch ?? $localBranch ?? "afk/$IssueNum-$(New-Slug $Title)"
-    $wt = Join-Path $WtRoot "issue-$IssueNum"
-    Log "  branch=$branch"
+    $ralphDir = Join-Path $Wt '.ralph'
+    New-Item -ItemType Directory -Force -Path $ralphDir | Out-Null
+    gh issue view $IssueNum --json number,title,body,labels | Set-Content (Join-Path $ralphDir 'issue.json') -Encoding utf8
+    Copy-Item (Join-Path $ScriptDir 'prompt.execute.md') (Join-Path $ralphDir 'exec.md') -Force
 
-    if (Test-Path $wt) { git worktree remove --force $wt 2>$null }
-    if ($remoteBranch) {
-        git worktree add $wt $branch --quiet
-    } elseif ($localBranch) {
-        git worktree add $wt $branch --quiet
+    # Plan fresh for every issue (fresh branch per run => no stale-plan reuse).
+    $planPath = Join-Path $ralphDir 'plan.md'
+    Remove-Item -LiteralPath $planPath -ErrorAction SilentlyContinue
+    $planPrompt = if ($StagedPlan) { 'prompt.plan.staged.md' } else { 'prompt.plan.md' }
+    Log "  planning… [$(if($StagedPlan){'staged-plan skill'}else{'standard'})]"
+    Invoke-Plan -Cwd $Wt -PromptText (Get-Content (Join-Path $ScriptDir $planPrompt) -Raw) -OutLog (Join-Path $issueRun 'plan.log') -Staged:$StagedPlan
+
+    $open = Get-OpenSteps $planPath
+    if ($open -lt 0) { Log "  no plan written — skipping issue."; return 'infeasible' }
+    if ($open -eq 0) { Log "  no actionable steps — infeasible, skipping issue."; return 'infeasible' }
+    Copy-Item $planPath (Join-Path $issueRun 'plan.md') -Force
+    Log "  plan: $open open step(s)"
+
+    if ($DryRun) { Log "  [DryRun] plan saved to $(Join-Path $issueRun 'plan.md')."; return 'dryrun' }
+
+    # --- Choose execution model: explicit override > plan judgment > default.
+    if ($ExecModel) {
+        $execModel = $ExecModel; $why = 'forced'
     } else {
-        git worktree add -b $branch $wt origin/main --quiet
+        $execModel = Get-RecommendedModel $planPath
+        if ($execModel) { $why = 'plan judgment' } else { $execModel = $DefaultExecModel; $why = 'default (no judgment)' }
     }
-    if ($LASTEXITCODE -ne 0) { Log "  ! could not create worktree — skipping."; return }
+    Log "  exec model: $execModel/$ExecEffort [$why]"
 
-    try {
-        $ralphDir = Join-Path $wt '.ralph'
-        New-Item -ItemType Directory -Force -Path $ralphDir | Out-Null
-        gh issue view $IssueNum --json number,title,body,labels | Set-Content (Join-Path $ralphDir 'issue.json') -Encoding utf8
-        Copy-Item (Join-Path $ScriptDir 'prompt.execute.md') (Join-Path $ralphDir 'exec.md') -Force
-
-        $planPath  = Join-Path $ralphDir 'plan.md'
-        $planCache = Join-Path $StateDir "issue-$IssueNum\plan.md"  # survives across runs (.ralph is gitignored)
-
-        if (Test-Path $planCache) {
-            Copy-Item $planCache $planPath -Force
-            Log "  resuming with cached plan ($(Get-OpenSteps $planPath) open step(s))."
-        } else {
-            $planPrompt = if ($StagedPlan) { 'prompt.plan.staged.md' } else { 'prompt.plan.md' }
-            Log "  planning… [$(if($StagedPlan){'staged-plan skill'}else{'standard'})]"
-            Invoke-Plan -Cwd $wt -PromptText (Get-Content (Join-Path $ScriptDir $planPrompt) -Raw) -OutLog (Join-Path $issueRun 'plan.log') -Staged:$StagedPlan
-            $open = Get-OpenSteps $planPath
-            if ($open -lt 0) { Log "  no plan written — skipping."; if (-not $NoPublish) { gh issue comment $IssueNum --body "Ralph: planning produced no plan file. Skipped." | Out-Null }; return }
-            if ($open -eq 0) { Log "  no actionable steps — infeasible."; if (-not $NoPublish) { gh issue comment $IssueNum --body "Ralph: planning found no actionable, autonomously-verifiable steps. Skipped." | Out-Null }; return }
-            New-Item -ItemType Directory -Force -Path (Split-Path $planCache) | Out-Null
-            Copy-Item $planPath $planCache -Force
-            Copy-Item $planPath (Join-Path $issueRun 'plan.md') -Force
-            Log "  plan: $open open step(s)"
+    # --- Execution ---
+    $script:LimitText = ''
+    $before = (git -C $Wt rev-parse HEAD).Trim()
+    if ($HeadlessExec) {
+        $promptFile = Join-Path $issueRun 'exec-prompt.in'
+        Get-Content (Join-Path $ScriptDir 'prompt.execute.md') -Raw | Set-Content $promptFile -Encoding utf8
+        Log "  executing [headless -p]…"
+        $status = Invoke-ExecLoop -Cwd $Wt -PlanPath $planPath -IssueRun $issueRun -PromptFile $promptFile -Model $execModel
+    } else {
+        Log "  executing [interactive$(if(-not $NoRemoteControl){' +remote'})]…"
+        $flag = Join-Path $issueRun 'status.flag'
+        $status = Invoke-Interactive -Cwd $Wt -FlagFile $flag -Model $execModel -Name "ralph-$IssueNum" `
+            -InitialPrompt 'Read .ralph/exec.md and follow it exactly to implement .ralph/plan.md for this issue. Emit RALPH_DONE_EXIT when finished.'
+        # Interactive sessions exit on a usage limit; detect it from the transcript.
+        if ($status -in @('exited', 'timeout', 'deadline', 'unknown')) {
+            $tr = Get-LatestTranscript
+            if ($tr) { $txt = Get-Content $tr.FullName -Raw; if (Test-LimitText $txt) { $status = 'limit'; $script:LimitText = $txt } }
         }
-
-        if ($DryRun) { Log "  [DryRun] plan saved to $(Join-Path $issueRun 'plan.md') (worktree kept at $wt)."; return }
-
-        # --- Choose execution model: explicit override > plan judgment > default.
-        if ($ExecModel) {
-            $execModel = $ExecModel; $why = 'forced'
-        } else {
-            $execModel = Get-RecommendedModel $planPath
-            if ($execModel) { $why = 'plan judgment' } else { $execModel = $DefaultExecModel; $why = 'default (no judgment)' }
-        }
-        Log "  exec model: $execModel/$ExecEffort [$why]"
-
-        # --- Execution ---
-        $script:LimitText = ''
-        if ($HeadlessExec) {
-            $promptFile = Join-Path $issueRun 'exec-prompt.in'
-            Get-Content (Join-Path $ScriptDir 'prompt.execute.md') -Raw | Set-Content $promptFile -Encoding utf8
-            Log "  executing [headless -p]…"
-            $status = Invoke-ExecLoop -Cwd $wt -PlanPath $planPath -IssueRun $issueRun -PromptFile $promptFile -Model $execModel
-        } else {
-            Log "  executing [interactive$(if(-not $NoRemoteControl){' +remote'})]…"
-            $flag = Join-Path $issueRun 'status.flag'
-            $status = Invoke-Interactive -Cwd $wt -FlagFile $flag -Model $execModel -Name "ralph-$IssueNum" `
-                -InitialPrompt 'Read .ralph/exec.md and follow it exactly to implement .ralph/plan.md for this issue. Emit RALPH_DONE_EXIT when finished.'
-            # Interactive sessions exit on a usage limit; detect it from the transcript.
-            if ($status -in @('exited', 'timeout', 'deadline', 'unknown')) {
-                $tr = Get-LatestTranscript
-                if ($tr) { $txt = Get-Content $tr.FullName -Raw; if (Test-LimitText $txt) { $status = 'limit'; $script:LimitText = $txt } }
-            }
-        }
-        Log "  execution ended: $status"
-
-        # Refresh the cached plan with the agent's checkbox progress.
-        if (Test-Path $planPath) { Copy-Item $planPath $planCache -Force }
-
-        if ($status -eq 'limit') {
-            $reset = if ($script:LimitText) { Get-ResetDateTime $script:LimitText } else { $null }
-            if (-not $reset) {
-                $lastErr = Get-ChildItem $issueRun -Filter 'exec-*.err' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
-                if ($lastErr) { $reset = Get-ResetDateTime (Get-Content $lastErr.FullName -Raw) }
-            }
-            if (-not $reset) { $reset = (Get-Date).AddMinutes(60) }   # fallback: try again in an hour
-            Schedule-Rerun $reset
-            $script:HaltForResume = $true
-            return
-        }
-
-        Publish-Result -IssueNum $IssueNum -Title $Title -Branch $branch -Wt $wt -Status $status
     }
-    catch { Log "  ! error on #${IssueNum}: $($_.Exception.Message)" }
-    finally {
-        # Keep the worktree when inspecting (DryRun/NoPublish) or resuming.
-        if (-not $script:HaltForResume -and -not $DryRun -and -not $NoPublish) { git worktree remove --force $wt 2>$null }
-    }
+
+    $after   = (git -C $Wt rev-parse HEAD).Trim()
+    $commits = @(git -C $Wt rev-list "$before..$after").Count
+    Log "  execution ended: $status ($commits commit(s) this issue)"
+    return $status
 }
 
 # --- Main ---------------------------------------------------------------------
-Log "Ralph run $RunStamp | deadline=$($Deadline.ToString('HH:mm')) perIssue=${MaxMinutesPerIssue}min plan=$PlanModel/$PlanEffort exec=$(if($ExecModel){$ExecModel}else{'auto'})/$ExecEffort$(if($HeadlessExec){' [headless]'}else{' [interactive]'})$(if($NoPublish){' [NoPublish]'})$(if($DryRun){' [DryRun]'})"
+Log "Ralph run $RunStamp | base=$BaseBranch deadline=$($Deadline.ToString('HH:mm')) perIssue=${MaxMinutesPerIssue}min plan=$PlanModel/$PlanEffort exec=$(if($ExecModel){$ExecModel}else{'auto'})/$ExecEffort$(if($HeadlessExec){' [headless]'}else{' [interactive]'})$(if($DryRun){' [DryRun]'})"
 git fetch origin --quiet
 
 $issues = (gh issue list --label AFK --state open --json number,title,labels --limit 100) | ConvertFrom-Json
 if ($OnlyIssue -gt 0) { $issues = $issues | Where-Object { $_.number -eq $OnlyIssue } }
-# Skip issues a previous run handed off to a human (labelled HITL).
-$issues = @($issues | Where-Object { $_.labels.name -notcontains 'HITL' })
 if (-not $issues) { Log "No open AFK issues to process. Done."; return }
 # Respect task sequence: process in ascending issue-number order (#5, #6, #9 ...).
 $issues = @($issues | Sort-Object number)
 Log "Queue: $($issues.Count) issue(s) in order: $((($issues | ForEach-Object { '#' + $_.number }) -join ' -> '))"
 
-# Skip issues that already have an OPEN PR (delivered/in-review); incomplete
-# branches without a PR are resumed.
-$openPrHeads = @()
-if (-not $NoPublish) {
-    $prs = gh pr list --state open --json headRefName | ConvertFrom-Json
-    if ($prs) { $openPrHeads = @($prs.headRefName) }   # empty when there are no open PRs
+# One branch per run, in a throwaway worktree off the chosen base.
+$Branch = "afk/run-$RunStamp"
+$Wt     = Join-Path $WtRoot "run-$RunStamp"
+if (-not (git rev-parse --verify --quiet "$BaseBranch^{commit}")) { Log "! base '$BaseBranch' not found — aborting."; return }
+if (Test-Path $Wt) { git worktree remove --force $Wt 2>$null }
+git worktree add -b $Branch $Wt $BaseBranch --quiet
+if ($LASTEXITCODE -ne 0) { Log "! could not create run worktree/branch — aborting."; return }
+Log "Run branch: $Branch  (base: $BaseBranch, worktree: $Wt)"
+
+$stopped    = $false
+$stopStatus = ''
+$lastIssue  = 0
+try {
+    foreach ($issue in $issues) {
+        if ((Get-Date) -ge $Deadline) { Log "DEADLINE reached. Stopping."; $stopped = $true; $stopStatus = 'deadline'; break }
+
+        $staged = $issue.labels.name -contains 'stagedplan'
+        $status = Invoke-Issue -IssueNum $issue.number -Title $issue.title -Wt $Wt -StagedPlan:$staged
+        $lastIssue = $issue.number
+
+        if ($status -eq 'DONE' -or $status -eq 'infeasible' -or $status -eq 'dryrun') { continue }
+
+        # Anything else is a non-green stop: hand over the branch as it stands.
+        $stopped = $true; $stopStatus = $status
+        if ($status -eq 'limit') {
+            $reset = if ($script:LimitText) { Get-ResetDateTime $script:LimitText } else { $null }
+            $when  = if ($reset) { " Resets ~$($reset.ToString('HH:mm')); re-run after that." } else { '' }
+            Log "STOP: usage limit hit on #$($issue.number).$when"
+        } elseif ($status -like 'BLOCKED*') {
+            Log "STOP: #$($issue.number) blocked — $(($status -replace '^BLOCKED','').Trim())"
+        } else {
+            Log "STOP: #$($issue.number) did not finish green ($status)."
+        }
+        break
+    }
 }
+catch { Log "! error on #${lastIssue}: $($_.Exception.Message)"; $stopped = $true; $stopStatus = 'error' }
+finally {
+    $commits = @(git -C $Wt rev-list "$BaseBranch..$Branch" 2>$null).Count
+    Log "----"
+    Log "Branch '$Branch' carries $commits commit(s) over $BaseBranch."
+    if ($commits -gt 0) { (git -C $Wt log --oneline "$BaseBranch..$Branch") | ForEach-Object { Log "    $_" } }
 
-foreach ($issue in $issues) {
-    if ((Get-Date) -ge $Deadline) { Log "DEADLINE reached. Stopping."; break }
-    if ($openPrHeads | Where-Object { $_ -like "afk/$($issue.number)-*" }) { Log "#$($issue.number) already has an open PR — skipping."; continue }
-
-    $staged = $issue.labels.name -contains 'stagedplan'
-    Invoke-Issue -IssueNum $issue.number -Title $issue.title -StagedPlan:$staged
-    if ($script:HaltForResume) { Log "Stopping run; re-run is scheduled."; break }
+    if ($stopped -or $DryRun) {
+        # Keep the worktree so you can inspect / fix the stalled state in place.
+        Log "Worktree kept for inspection: $Wt"
+    } else {
+        # Clean run: remove the worktree (the branch persists in the repo).
+        git worktree remove --force $Wt 2>$null
+    }
+    Log "Review, then merge '$Branch' into your target (base was $BaseBranch):  git merge $Branch"
+    Log "Logs: $RunDir"
 }
-
-Log "Ralph run complete. Logs: $RunDir"
