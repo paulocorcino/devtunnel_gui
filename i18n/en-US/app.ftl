@@ -15,11 +15,6 @@ btn-new-group = New group
 btn-add-port = Add port
 btn-settings = Settings
 
-## Dialog — settings
-dlg-settings-title = Settings
-field-autostart = Start with Windows
-btn-done = Done
-
 ## Row actions
 btn-del-port = Delete port
 btn-del-group = Delete group
@@ -80,6 +75,19 @@ badge-operational = Operational
 badge-service-down = Service down
 badge-down = Down
 badge-provisioning = Provisioning…
+
+## Settings
+settings-title = Settings
+field-auto-start = Start with Windows
+field-probe-interval = Probe interval (seconds)
+btn-close = Close
+
+## Re-login (expired CLI sign-in)
+relogin-message = Sign-in expired — sign in again to keep hosting
+btn-sign-in = Sign in
+status-signing-in = signing in…
+toast-relogin-title = DevTunnel GUI — sign-in required
+toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
 
 ## Tray menu
 menu-open-window = Open window
