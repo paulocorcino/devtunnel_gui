@@ -1,0 +1,50 @@
+// Ghost icon button for row actions (copy ⧉, open ↗, delete ✕).
+// Hidden by default; fades in when the parent row is hovered (`revealed`),
+// or stays visible when `always-visible` is set (compact / touch layouts).
+import { Theme } from "theme.slint";
+import { TooltipBubble } from "tooltip.slint";
+
+export component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <string> tip: "";
+    in property <bool> revealed: true;
+    in property <bool> always-visible: false;
+    in property <bool> enabled: true;
+    in property <bool> danger: false;
+    callback clicked();
+
+    property <bool> shown: root.revealed || root.always-visible;
+
+    width: Theme.icon-btn-size;
+    height: Theme.icon-btn-size;
+    border-radius: Theme.gap-sm;
+    background: ta.has-hover && root.enabled ? Theme.border : transparent;
+    opacity: !root.shown ? 0 : (root.enabled ? 1.0 : 0.35);
+    animate opacity { duration: 120ms; }
+
+    Text {
+        text: root.glyph;
+        color: root.danger
+            ? Theme.down
+            : (ta.has-hover && root.enabled ? Theme.text : Theme.muted);
+        font-size: Theme.fs-section;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+        width: 100%;
+        height: 100%;
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled && root.shown;
+        clicked => {
+            root.clicked();
+        }
+    }
+
+    TooltipBubble {
+        x: (parent.width - self.width) / 2;
+        y: -self.height - Theme.gap-sm;
+        tip: root.tip;
+        shown: ta.has-hover && root.enabled;
+    }
+}

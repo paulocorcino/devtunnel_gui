@@ -30,8 +30,9 @@ env_logger = { version = "0.11", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
-# HKCU Run-key auto-start toggle (issue #5).
-winreg = "0.52"
+# Initial dark-mode detection: read the Windows "apps use light theme" setting.
+# Also used for the HKCU Run-key auto-start toggle (issue #5).
+winreg = "0.55"
 # Windows toast for the re-login case only (issue #5).
 tauri-winrt-notification = "0.7"
 

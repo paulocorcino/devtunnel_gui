@@ -1,0 +1,33 @@
+// Status dot colored by state id (see Theme.status-color), with an optional
+// tooltip label and a subtle pulse while connecting to the relay ("Hosting…").
+import { Theme } from "theme.slint";
+import { TooltipBubble } from "tooltip.slint";
+
+export component StatusDot inherits Rectangle {
+    in property <string> status: "idle";
+    // Tooltip label for the state (localized; empty = no tooltip).
+    in property <string> tip: "";
+
+    width: Theme.dot-size;
+    height: Theme.dot-size;
+
+    dot := Rectangle {
+        width: 100%;
+        height: 100%;
+        border-radius: self.width / 2;
+        background: Theme.status-color(root.status);
+        // Light pulse while the host engine is connecting to the relay.
+        opacity: root.status == "host"
+            ? 0.55 + 0.45 * sin(360deg * (animation-tick() / 1.6s))
+            : 1.0;
+    }
+
+    ta := TouchArea { }
+
+    TooltipBubble {
+        x: (parent.width - self.width) / 2;
+        y: -self.height - Theme.gap-sm;
+        tip: root.tip;
+        shown: ta.has-hover;
+    }
+}

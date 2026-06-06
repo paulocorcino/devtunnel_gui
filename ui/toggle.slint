@@ -1,0 +1,35 @@
+// Toggle switch (Host/Stop in the group card header).
+// Purely presentational: bound to `checked`, emits `toggled(new-value)`;
+// the owner flips the state when the underlying operation is dispatched.
+import { Theme } from "theme.slint";
+
+export component Toggle inherits Rectangle {
+    in property <bool> checked: false;
+    in property <bool> enabled: true;
+    callback toggled(bool /*new value*/);
+
+    width: Theme.toggle-width;
+    height: Theme.toggle-height;
+    border-radius: self.height / 2;
+    background: root.checked ? Theme.accent : Theme.border;
+    opacity: root.enabled ? (ta.has-hover ? 0.9 : 1.0) : 0.45;
+    animate background { duration: 120ms; }
+
+    knob := Rectangle {
+        property <length> inset: (parent.height - self.height) / 2;
+        width: Theme.toggle-knob;
+        height: Theme.toggle-knob;
+        border-radius: self.width / 2;
+        background: Theme.accent-text;
+        y: self.inset;
+        x: root.checked ? parent.width - self.width - self.inset : self.inset;
+        animate x { duration: 120ms; easing: ease-out; }
+    }
+
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.toggled(!root.checked);
+        }
+    }
+}

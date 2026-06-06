@@ -108,6 +108,26 @@ metric-na = n/a
 metric-rate-per-second = { $value }/s
 logs-empty = No log entries yet.
 
+## Status-dot tooltip labels (idle / hosting states; health states reuse badge-*)
+badge-stopped = Stopped
+badge-hosting = Hosting…
+
+## Top bar (redesign)
+app-title = Dev Tunnels
+pill-connected = Connected
+tooltip-settings = Toggle dark mode
+
+## Row action tooltips
+tooltip-copy = Copy URL
+tooltip-open = Open in browser
+
+## Toast
+toast-copied = URL copied
+
+## Empty state
+empty-title = No groups yet
+btn-create-group = + Create group
+
 ## Tray menu
 menu-open-window = Open window
 menu-copy-url = Copy URL

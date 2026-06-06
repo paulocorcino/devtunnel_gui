@@ -1,0 +1,143 @@
+// One port inside a GroupCard: status dot · port · protocol pill ·
+// prominent monospace URL (click-to-copy) · hover actions (copy ⧉, open ↗)
+// and a de-emphasised delete action.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { StatusDot } from "status-dot.slint";
+import { Pill } from "pill.slint";
+import { IconButton } from "icon-button.slint";
+
+// One port of a group, as shown inside a GroupCard.
+export struct PortView {
+    port: int,
+    protocol: string,
+    url: string,
+    status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"
+    // Stable index into the flat row model in Rust, used to key the expandable
+    // detail panel (issue #17). -1 for inert placeholder rows.
+    row-index: int,
+}
+
+export component PortRow inherits Rectangle {
+    in property <PortView> pv;
+    // Show row actions permanently (compact / touch layouts).
+    in property <bool> always-show-actions: false;
+    // True when this row's detail panel is currently expanded.
+    in property <bool> selected: false;
+    callback copy-url(string);
+    callback open-url(string);
+    callback delete-port(int);
+    // Row click: expand/collapse the detail panel for (row-index, port).
+    callback toggle-detail(int /*row-index*/, int /*port*/);
+
+    // Localized tooltip label for a status id (the "badge").
+    pure function status-label(s: string) -> string {
+        s == "ok" ? Strings.badge-operational : (s == "warn" ? Strings.badge-service-down : (s == "down" ? Strings.badge-down : (s == "provisioning" ? Strings.badge-provisioning : (s == "host" ? Strings.badge-hosting : Strings.badge-stopped))));
+    }
+
+    // A real, configured port (not a provisioning placeholder) can expand its
+    // metrics/logs detail panel.
+    property <bool> expandable: pv.row-index >= 0 && pv.status != "provisioning";
+
+    height: Theme.row-height;
+    background: root.selected
+        ? Theme.surface-2
+        : (hover.has-hover ? Theme.surface-2 : transparent);
+    border-radius: Theme.gap-sm;
+
+    // Click on the row body (behind the URL/actions) toggles the detail panel.
+    hover := TouchArea {
+        mouse-cursor: root.expandable ? MouseCursor.pointer : MouseCursor.default;
+        clicked => {
+            if (root.expandable) {
+                root.toggle-detail(pv.row-index, pv.port);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        padding-left: Theme.pad;
+        padding-right: Theme.pad;
+        spacing: Theme.gap;
+
+        VerticalLayout {
+            alignment: center;
+            StatusDot {
+                status: pv.status;
+                tip: root.status-label(pv.status);
+            }
+        }
+
+        Text {
+            text: "\{pv.port}";
+            color: Theme.text;
+            font-size: Theme.fs-section;
+            font-weight: 600;
+            vertical-alignment: center;
+            min-width: Theme.toggle-width;
+        }
+
+        VerticalLayout {
+            alignment: center;
+            Pill { text: pv.protocol == "" ? "—" : pv.protocol; }
+        }
+
+        // The URL is the product: prominent, monospace, click-to-copy.
+        url-area := TouchArea {
+            enabled: pv.url != "";
+            mouse-cursor: pv.url == "" ? MouseCursor.default : MouseCursor.pointer;
+            horizontal-stretch: 1;
+            clicked => {
+                root.copy-url(pv.url);
+            }
+            Text {
+                width: 100%;
+                text: pv.url == "" ? Strings.no-url : pv.url;
+                color: pv.url == "" ? Theme.muted : (url-area.has-hover ? Theme.accent : Theme.text);
+                font-size: Theme.fs-body;
+                font-family: Theme.mono;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+
+        VerticalLayout {
+            alignment: center;
+            HorizontalLayout {
+                spacing: Theme.gap-sm;
+                IconButton {
+                    glyph: "⧉";
+                    tip: Strings.tooltip-copy;
+                    revealed: hover.has-hover;
+                    always-visible: root.always-show-actions;
+                    enabled: pv.url != "";
+                    clicked => {
+                        root.copy-url(pv.url);
+                    }
+                }
+                IconButton {
+                    glyph: "↗";
+                    tip: Strings.tooltip-open;
+                    revealed: hover.has-hover;
+                    always-visible: root.always-show-actions;
+                    enabled: pv.url != "";
+                    clicked => {
+                        root.open-url(pv.url);
+                    }
+                }
+                IconButton {
+                    glyph: "✕";
+                    tip: Strings.btn-del-port;
+                    revealed: hover.has-hover;
+                    always-visible: root.always-show-actions;
+                    danger: true;
+                    // Provisioning rows are inert.
+                    enabled: pv.status != "provisioning";
+                    clicked => {
+                        root.delete-port(pv.port);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1,0 +1,228 @@
+// Themed form controls for dialogs: Field (labeled text input), Select
+// (dropdown), Check (checkbox), and Collapsible (expandable section).
+// These replace the bare std-widgets, which ignore the app Theme.
+import { Theme } from "theme.slint";
+
+// Labeled single-line text input.
+export component Field inherits VerticalLayout {
+    in property <string> label;
+    in property <string> placeholder;
+    in-out property <string> text;
+    in property <bool> number-only: false;
+    callback accepted();
+
+    spacing: Theme.gap-sm;
+
+    Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: Theme.fs-caption;
+    }
+
+    Rectangle {
+        height: Theme.btn-height;
+        background: Theme.bg;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.border;
+        border-radius: Theme.gap-sm;
+
+        input := TextInput {
+            x: Theme.gap;
+            width: parent.width - Theme.gap * 2;
+            height: 100%;
+            vertical-alignment: center;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            single-line: true;
+            input-type: root.number-only ? InputType.number : InputType.text;
+            text <=> root.text;
+            accepted => {
+                root.accepted();
+            }
+        }
+        if root.text == "" : Text {
+            x: Theme.gap;
+            height: 100%;
+            text: root.placeholder;
+            color: Theme.muted;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// Labeled dropdown picker.
+export component Select inherits VerticalLayout {
+    in property <string> label;
+    in property <[string]> model;
+    in-out property <int> current-index: 0;
+    out property <string> current-value: root.model[root.current-index];
+
+    spacing: Theme.gap-sm;
+
+    Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: Theme.fs-caption;
+    }
+
+    box := Rectangle {
+        height: Theme.btn-height;
+        background: Theme.bg;
+        border-width: 1px;
+        border-color: ta.has-hover ? Theme.accent : Theme.border;
+        border-radius: Theme.gap-sm;
+
+        HorizontalLayout {
+            padding-left: Theme.gap;
+            padding-right: Theme.gap;
+            spacing: Theme.gap;
+            Text {
+                text: root.current-value;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+            Text {
+                text: "▾";
+                color: Theme.muted;
+                font-size: Theme.fs-caption;
+                vertical-alignment: center;
+            }
+        }
+
+        ta := TouchArea {
+            clicked => {
+                popup.show();
+            }
+        }
+
+        popup := PopupWindow {
+            x: 0;
+            y: parent.height + Theme.gap-sm;
+            width: parent.width;
+
+            Rectangle {
+                background: Theme.surface-2;
+                border-width: 1px;
+                border-color: Theme.border;
+                border-radius: Theme.gap-sm;
+
+                VerticalLayout {
+                    padding: Theme.gap-sm;
+                    for value[i] in root.model : Rectangle {
+                        height: Theme.btn-height;
+                        background: ita.has-hover ? Theme.surface : transparent;
+                        border-radius: Theme.gap-sm;
+                        ita := TouchArea {
+                            clicked => {
+                                root.current-index = i;
+                            }
+                        }
+                        HorizontalLayout {
+                            padding-left: Theme.gap;
+                            padding-right: Theme.gap;
+                            Text {
+                                text: value;
+                                color: i == root.current-index ? Theme.accent : Theme.text;
+                                font-size: Theme.fs-body;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Checkbox with a label.
+export component Check inherits Rectangle {
+    in property <string> text;
+    in-out property <bool> checked;
+
+    height: Theme.toggle-height;
+
+    HorizontalLayout {
+        spacing: Theme.gap;
+        alignment: start;
+        box := Rectangle {
+            width: Theme.toggle-height * 0.8;
+            height: Theme.toggle-height * 0.8;
+            y: (parent.height - self.height) / 2;
+            background: root.checked ? Theme.accent : Theme.bg;
+            border-width: 1px;
+            border-color: root.checked ? Theme.accent : Theme.border;
+            border-radius: Theme.gap-sm;
+            Text {
+                width: 100%;
+                height: 100%;
+                text: "✓";
+                visible: root.checked;
+                color: Theme.accent-text;
+                font-size: Theme.fs-caption;
+                horizontal-alignment: center;
+                vertical-alignment: center;
+            }
+        }
+        Text {
+            text: root.text;
+            color: Theme.text;
+            font-size: Theme.fs-body;
+            vertical-alignment: center;
+        }
+    }
+
+    ta := TouchArea {
+        clicked => {
+            root.checked = !root.checked;
+        }
+    }
+}
+
+// Expandable section (e.g. "Advanced"): clickable chevron header over content.
+export component Collapsible inherits VerticalLayout {
+    in property <string> title;
+    in-out property <bool> expanded: false;
+
+    spacing: Theme.gap;
+
+    Rectangle {
+        height: Theme.toggle-height;
+        HorizontalLayout {
+            spacing: Theme.gap-sm;
+            alignment: start;
+            Text {
+                text: root.expanded ? "▾" : "▸";
+                color: Theme.muted;
+                font-size: Theme.fs-caption;
+                vertical-alignment: center;
+            }
+            Text {
+                text: root.title;
+                color: Theme.muted;
+                font-size: Theme.fs-caption;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+        }
+        TouchArea {
+            clicked => {
+                root.expanded = !root.expanded;
+            }
+        }
+    }
+
+    content := Rectangle {
+        clip: true;
+        height: root.expanded ? inner.preferred-height : 0;
+        animate height { duration: 120ms; easing: ease-out; }
+        inner := VerticalLayout {
+            width: 100%;
+            spacing: Theme.gap;
+            @children
+        }
+    }
+}

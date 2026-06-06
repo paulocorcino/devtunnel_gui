@@ -183,6 +183,10 @@ fn main() -> anyhow::Result<()> {
 
     let app = AppWindow::new()?;
 
+    // Dark mode is first-class: start from the Windows app theme; the ⚙
+    // affordance in the top bar toggles it at runtime.
+    app.global::<Theme>().set_dark(system_prefers_dark());
+
     let loc = Rc::new(Locale::load(&locale::system_locale()));
     apply_strings(&app, &loc);
 
@@ -892,6 +896,24 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// True when Windows is set to dark app mode (`AppsUseLightTheme == 0`).
+/// Defaults to light when the value is missing or unreadable.
+#[cfg(windows)]
+fn system_prefers_dark() -> bool {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+    RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize")
+        .and_then(|k| k.get_value::<u32, _>("AppsUseLightTheme"))
+        .map(|v| v == 0)
+        .unwrap_or(false)
+}
+
+#[cfg(not(windows))]
+fn system_prefers_dark() -> bool {
+    false
+}
+
 fn show_window(weak: &slint::Weak<AppWindow>) {
     if let Some(a) = weak.upgrade() {
         let _ = a.show();
@@ -1055,9 +1077,11 @@ fn apply_rows(
     }
 }
 
-/// Rebuilds the Slint row model and tray menu from the cached load, deriving each
-/// row's `status` and `host-state` from the latest probe/host events. Runs on the
-/// UI thread (after a load, or when a host/probe event updates derived state).
+/// Rebuilds the Slint group model and tray menu from the cached load, folding the
+/// flat CLI rows into per-group `GroupView`s with nested `PortView`s. Each port's
+/// `status` and each group's `hosting` flag derive from the latest probe/host
+/// events. Runs on the UI thread (after a load, or when a host/probe event
+/// updates derived state).
 fn rebuild_rows(
     app: &AppWindow,
     tray: &tray_icon::TrayIcon,
@@ -1066,46 +1090,106 @@ fn rebuild_rows(
     loc: &Rc<Locale>,
 ) {
     let st = state.borrow();
-    let mut model: Vec<PortRow> = st
+    // Build a flat index space first: every visible (non-hidden) real port gets a
+    // stable `row-index` used to key the expandable detail panel (issue #17). The
+    // same index drives `selected-index` so the open panel survives reloads.
+    // Optimistic delete (#13) hides ports/groups awaiting their confirming refresh.
+    let visible_rows: Vec<&devtunnel::Row> = st
         .rows
         .iter()
         .filter(|r| {
             !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
                 && !st.hidden.contains(&(r.tunnel_id.clone(), None))
         })
-        .map(|r| PortRow {
-            group: r.group.clone().into(),
-            tunnel_id: r.tunnel_id.clone().into(),
-            port: r.port,
-            protocol: r.protocol.clone().into(),
-            url: r.url.clone().into(),
-            expiration: r.expiration.clone().into(),
-            status: derive_status(&st, &r.tunnel_id, r.port, r.host_connections).into(),
-            host_state: derive_host_state(&st, &r.tunnel_id, r.host_connections).into(),
-        })
         .collect();
 
-    // Append a placeholder row for each in-flight create operation.
-    // Placeholders have empty url/expiration/tunnel_id so they are skipped by build_tray_menu.
-    for p in &st.placeholders {
-        model.push(PortRow {
-            group: p.group.clone().into(),
-            tunnel_id: SharedString::new(),
-            port: p.port,
-            protocol: p.protocol.clone().into(),
-            url: SharedString::new(),
-            expiration: SharedString::new(),
-            status: PROVISIONING_STATUS.into(),
-            host_state: SharedString::new(),
-        });
+    // Fold the flat rows into groups (Real Tunnel ID order preserved). Ports are
+    // collected separately and attached as models at the end.
+    let mut groups: Vec<GroupView> = Vec::new();
+    let mut ports: Vec<Vec<PortView>> = Vec::new();
+    let mut index: HashMap<String, usize> = HashMap::new();
+    for (flat_idx, r) in visible_rows.iter().enumerate() {
+        let gi = match index.get(&r.tunnel_id) {
+            Some(&i) => i,
+            None => {
+                index.insert(r.tunnel_id.clone(), groups.len());
+                groups.push(GroupView {
+                    group: r.group.clone().into(),
+                    tunnel_id: r.tunnel_id.clone().into(),
+                    expiration: r.expiration.clone().into(),
+                    hosting: derive_host_state(&st, &r.tunnel_id, r.host_connections) == "hosting",
+                    // "Hosted elsewhere" pill: service reports connections but this
+                    // session is not hosting the group (issue #15).
+                    host_state: derive_host_state(&st, &r.tunnel_id, r.host_connections).into(),
+                    provisioning: false,
+                    has_port: false,
+                    ports: ModelRc::default(),
+                });
+                ports.push(Vec::new());
+                groups.len() - 1
+            }
+        };
+        // A port==0 row is a portless group: keep the card, skip the port row.
+        if r.port != 0 {
+            groups[gi].has_port = true;
+            ports[gi].push(PortView {
+                port: r.port,
+                protocol: r.protocol.clone().into(),
+                url: r.url.clone().into(),
+                status: derive_status(&st, &r.tunnel_id, r.port, r.host_connections).into(),
+                row_index: flat_idx as i32,
+            });
+        }
     }
 
-    // Recompute the expanded row's index: rows can reorder or disappear across
-    // reloads, so the selection is keyed by (tunnel_id, port), not by index.
+    // Optimistic placeholders for in-flight creates: attach the provisioning
+    // port to its existing group (matched by friendly name) when possible,
+    // otherwise add a whole provisioning card. Placeholders are inert, so they
+    // carry row-index -1 (not expandable).
+    for p in &st.placeholders {
+        match groups.iter().position(|g| g.group == p.group.as_str()) {
+            Some(gi) if p.port != 0 => ports[gi].push(PortView {
+                port: p.port,
+                protocol: p.protocol.clone().into(),
+                url: SharedString::new(),
+                status: PROVISIONING_STATUS.into(),
+                row_index: -1,
+            }),
+            _ => {
+                groups.push(GroupView {
+                    group: p.group.clone().into(),
+                    tunnel_id: SharedString::new(),
+                    expiration: SharedString::new(),
+                    hosting: false,
+                    host_state: SharedString::new(),
+                    provisioning: true,
+                    has_port: p.port != 0,
+                    ports: ModelRc::default(),
+                });
+                ports.push(if p.port != 0 {
+                    vec![PortView {
+                        port: p.port,
+                        protocol: p.protocol.clone().into(),
+                        url: SharedString::new(),
+                        status: PROVISIONING_STATUS.into(),
+                        row_index: -1,
+                    }]
+                } else {
+                    Vec::new()
+                });
+            }
+        }
+    }
+    for (g, pv) in groups.iter_mut().zip(ports) {
+        g.ports = ModelRc::new(VecModel::from(pv));
+    }
+
+    // Recompute the expanded port's flat index: rows can reorder or disappear
+    // across reloads, so the selection is keyed by (tunnel_id, port), not index.
     let mut selected = -1;
     let mut stale_detail = false;
     if let Some((tid, port)) = st.detail.as_ref() {
-        match model
+        match visible_rows
             .iter()
             .position(|r| r.tunnel_id == tid.as_str() && r.port == *port)
         {
@@ -1114,12 +1198,13 @@ fn rebuild_rows(
         }
     }
 
-    // Rebuild the tray menu with per-port actions from the same data.
-    let menu = build_tray_menu(&model, &mut actions.borrow_mut(), loc);
+    // Rebuild the tray menu with per-port actions from the same load (placeholders
+    // have no URL, so they are skipped by build_tray_menu).
+    let menu = build_tray_menu(&st.rows, &mut actions.borrow_mut(), loc);
     tray.set_menu(Some(Box::new(menu)));
 
     app.set_selected_index(selected);
-    app.set_rows(ModelRc::new(VecModel::from(model)));
+    app.set_groups(ModelRc::new(VecModel::from(groups)));
 
     // The selected port no longer exists (deleted elsewhere): collapse so the
     // poll timer stops issuing CLI calls for it.
@@ -1201,7 +1286,11 @@ fn refresh_logs(app: &AppWindow) {
 
 /// Builds the tray menu: "Open window", one submenu per port with URL actions
 /// (Copy / Open) and "Quit". Repopulates the `MenuId -> Action` map.
-fn build_tray_menu(rows: &[PortRow], actions: &mut HashMap<MenuId, Action>, loc: &Locale) -> Menu {
+fn build_tray_menu(
+    rows: &[devtunnel::Row],
+    actions: &mut HashMap<MenuId, Action>,
+    loc: &Locale,
+) -> Menu {
     actions.clear();
     let menu = Menu::new();
 
@@ -1260,6 +1349,18 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_badge_hosted_external(loc.t("badge-hosted-external").into());
     s.set_btn_del_port(loc.t("btn-del-port").into());
     s.set_btn_del_group(loc.t("btn-del-group").into());
+
+    // Redesign: status-dot tooltips, top bar, row tooltips, toast, empty state
+    s.set_badge_stopped(loc.t("badge-stopped").into());
+    s.set_badge_hosting(loc.t("badge-hosting").into());
+    s.set_app_title(loc.t("app-title").into());
+    s.set_pill_connected(loc.t("pill-connected").into());
+    s.set_tooltip_settings(loc.t("tooltip-settings").into());
+    s.set_tooltip_copy(loc.t("tooltip-copy").into());
+    s.set_tooltip_open(loc.t("tooltip-open").into());
+    s.set_toast_copied(loc.t("toast-copied").into());
+    s.set_empty_title(loc.t("empty-title").into());
+    s.set_btn_create_group(loc.t("btn-create-group").into());
 
     // Dialogs — common
     s.set_btn_cancel(loc.t("btn-cancel").into());

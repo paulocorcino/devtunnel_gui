@@ -3,61 +3,25 @@ import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
-import { PortDetailPanel } from "port-detail.slint";
+import { Pill } from "pill.slint";
+import { IconButton } from "icon-button.slint";
+import { GroupCard, GroupView, PortView } from "group-card.slint";
+import { Toast } from "toast.slint";
+import { EmptyState } from "empty-state.slint";
 import { PreflightBanner } from "banner.slint";
 import { SettingsDialog } from "settings.slint";
-export { Strings }
-
-// One row = one port of a group (tunnel), with its Public URL.
-export struct PortRow {
-    group: string,     // friendly group name (falls back to tunnel-id)
-    tunnel-id: string, // Real Tunnel ID (stable service key)
-    port: int,
-    protocol: string,
-    url: string,
-    expiration: string,
-    status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"  (see theme.slint)
-    host-state: string, // "" (not hosting) | "hosting" (this session) | "external" (another session)
-}
-
-// Status dot colored by state.
-component StatusDot inherits Rectangle {
-    in property <string> status: "idle";
-    width: 9px;
-    height: 9px;
-    border-radius: self.width / 2;
-    background: Theme.status-color(root.status);
-}
-
-// Small chip (protocol, expiration).
-component Pill inherits Rectangle {
-    in property <string> text;
-    background: Theme.surface;
-    border-width: 1px;
-    border-color: Theme.border;
-    border-radius: 6px;
-    height: 18px;
-    HorizontalLayout {
-        padding-left: 6px;
-        padding-right: 6px;
-        Text {
-            text: root.text;
-            color: Theme.muted;
-            font-size: Theme.fs-caption;
-            vertical-alignment: center;
-        }
-    }
-}
+export { Strings, Theme, GroupView, PortView }
 
 export component AppWindow inherits Window {
-    title: "DevTunnel GUI";
+    title: Strings.app-title;
     preferred-width: 820px;
     preferred-height: 560px;
     min-width: 560px;
     min-height: 380px;
     background: Theme.bg;
 
-    in property <[PortRow]> rows;
+    // Groups (tunnels) with their nested ports, folded in Rust from the flat CLI rows.
+    in property <[GroupView]> groups;
     in property <string> status: Strings.status-loading;
     // Group picker data for the "Add port" dialog (parallel arrays; the
     // "+ New group…" entry is last, with an empty id).
@@ -118,56 +82,82 @@ export component AppWindow inherits Window {
     // Row click: expand/collapse the detail panel for (index, tunnel-id, port).
     callback toggle-detail(int /*index*/, string /*tunnel-id*/, int /*port*/);
 
+    // Copy + show the "URL copied" toast (URL click and ⧉ button both land here).
+    function do-copy(url: string) {
+        root.copy-url(url);
+        toast.show();
+    }
+
     VerticalLayout {
         width: 100%;
         height: 100%;
+
         // ---- Top bar ----
         Rectangle {
             background: Theme.surface;
-            height: 52px;
+            height: Theme.topbar-height;
             HorizontalLayout {
                 padding-left: Theme.pad;
                 padding-right: Theme.pad;
                 spacing: Theme.gap;
                 Text {
-                    text: "Dev Tunnels";
+                    text: Strings.app-title;
                     color: Theme.text;
                     font-size: Theme.fs-title;
                     font-weight: 700;
                     vertical-alignment: center;
                 }
                 Rectangle { horizontal-stretch: 1; }
-                Pill { text: root.status; }
-                TxtButton {
-                    text: Strings.btn-settings;
-                    clicked => {
-                        root.open-settings();
+                VerticalLayout {
+                    alignment: center;
+                    Pill { text: root.status; }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    TxtButton {
+                        text: Strings.btn-add-port;
+                        clicked => {
+                            root.show-add-port = true;
+                        }
                     }
                 }
-                TxtButton {
-                    text: Strings.btn-new-group;
-                    clicked => {
-                        root.show-create-group = true;
+                VerticalLayout {
+                    alignment: center;
+                    TxtButton {
+                        text: Strings.btn-refresh;
+                        primary: true;
+                        clicked => {
+                            root.refresh();
+                        }
                     }
                 }
-                TxtButton {
-                    text: Strings.btn-add-port;
-                    clicked => {
-                        root.show-add-port = true;
+                VerticalLayout {
+                    alignment: center;
+                    // Settings dialog: auto-start toggle (issues #5/#13).
+                    TxtButton {
+                        text: Strings.btn-settings;
+                        clicked => {
+                            root.open-settings();
+                        }
                     }
                 }
-                TxtButton {
-                    text: Strings.btn-refresh;
-                    primary: true;
-                    clicked => {
-                        root.refresh();
+                VerticalLayout {
+                    alignment: center;
+                    // Dark-mode toggle affordance.
+                    IconButton {
+                        glyph: "⚙";
+                        tip: Strings.tooltip-settings;
+                        always-visible: true;
+                        clicked => {
+                            Theme.dark = !Theme.dark;
+                        }
                     }
                 }
             }
         }
         Rectangle { height: 1px; background: Theme.border; }
 
-        // ---- Preflight banner (CLI missing / re-login) ----
+        // ---- Preflight banner (CLI missing / re-login) — issue #14 ----
         if root.app-state != "ready" : PreflightBanner {
             app-state: root.app-state;
             sign-in => {
@@ -175,168 +165,78 @@ export component AppWindow inherits Window {
             }
         }
 
-        // ---- List ----
-        ListView {
-            for row[idx] in root.rows : Rectangle {
-                // Placeholder (provisioning) and portless rows have no metrics to show.
-                property <bool> expandable: row.tunnel-id != "" && row.port != 0;
-                property <bool> expanded: self.expandable && idx == root.selected-index;
-                height: self.expanded
-                    ? Theme.row-height + Theme.detail-height + Theme.gap
-                    : Theme.row-height;
-
-                VerticalLayout {
-                    Rectangle {
-                        height: Theme.row-height;
-                        hover := TouchArea {
-                            clicked => {
-                                if (expandable) {
-                                    root.toggle-detail(idx, row.tunnel-id, row.port);
-                                }
-                            }
-                        }
-                        background: hover.has-hover ? Theme.surface-2 : transparent;
-
-                        HorizontalLayout {
-                            padding-left: Theme.pad;
-                            padding-right: Theme.pad;
-                            spacing: 10px;
-
-                    // status dot + health badge
-                    VerticalLayout {
-                        alignment: center;
-                        HorizontalLayout {
-                            spacing: 6px;
-                            VerticalLayout {
-                                alignment: center;
-                                StatusDot { status: row.status; }
-                            }
-                            // Localized badge label for health states and provisioning; hidden when idle/host.
-                            if row.status == "ok" || row.status == "warn" || row.status == "down" || row.status == "provisioning" :
-                            Pill {
-                                text: row.status == "ok"
-                                    ? Strings.badge-operational
-                                    : (row.status == "warn"
-                                        ? Strings.badge-service-down
-                                        : (row.status == "down"
-                                            ? Strings.badge-down
-                                            : Strings.badge-provisioning));
-                            }
-                            // "Hosted elsewhere": service reports active connections but this session is not hosting.
-                            if row.host-state == "external" :
-                            Pill { text: Strings.badge-hosted-external; }
-                        }
+        // ---- Group cards / empty state ----
+        if root.groups.length == 0 : EmptyState {
+            vertical-stretch: 1;
+            create-group => {
+                root.show-create-group = true;
+            }
+        }
+        if root.groups.length > 0 : ListView {
+            vertical-stretch: 1;
+            for g in root.groups : VerticalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                padding-top: Theme.gap;
+                GroupCard {
+                    gv: g;
+                    hosting-enabled: root.hosting-enabled;
+                    // Detail panel state (issue #17): which port is expanded and
+                    // its pre-formatted metric/log values.
+                    selected-index: root.selected-index;
+                    detail-upload-total: root.detail-upload-total;
+                    detail-upload-rate: root.detail-upload-rate;
+                    detail-download-total: root.detail-download-total;
+                    detail-download-rate: root.detail-download-rate;
+                    detail-connections: root.detail-connections;
+                    detail-logs: root.detail-logs;
+                    host => {
+                        root.host(g.tunnel-id);
                     }
-
-                    // port + url + meta
-                    VerticalLayout {
-                        spacing: 2px;
-                        alignment: center;
-                        HorizontalLayout {
-                            spacing: 8px;
-                            Text {
-                                text: "\{row.port}";
-                                color: Theme.text;
-                                font-size: Theme.fs-section;
-                                font-weight: 600;
-                                vertical-alignment: center;
-                            }
-                            Pill { text: row.protocol == "" ? "—" : row.protocol; }
-                            Text {
-                                text: row.url == "" ? Strings.no-url : row.url;
-                                color: row.url == "" ? Theme.muted : Theme.accent;
-                                font-size: Theme.fs-body;
-                                font-family: Theme.mono;
-                                overflow: elide;
-                                vertical-alignment: center;
-                            }
-                        }
-                        Text {
-                            text: row.group == row.tunnel-id
-                                ? "\{row.tunnel-id} · \{Strings.expires-label}: \{row.expiration}"
-                                : "\{row.group} (\{row.tunnel-id}) · \{Strings.expires-label}: \{row.expiration}";
-                            color: Theme.muted;
-                            font-size: Theme.fs-caption;
-                        }
+                    stop => {
+                        root.stop(g.tunnel-id);
                     }
-
-                    Rectangle { horizontal-stretch: 1; }
-
-                    VerticalLayout {
-                        alignment: center;
-                        HorizontalLayout {
-                            spacing: 6px;
-                            // Per-group Host/Stop toggle. Disabled in the default
-                            // (non-hosting) build; label reflects the group state.
-                            TxtButton {
-                                text: row.host-state == "hosting" ? Strings.btn-stop : Strings.btn-host;
-                                primary: row.host-state != "hosting";
-                                // Hosting a group with no port forwards nothing, so only
-                                // enable Host when the group has a port (or to Stop an
-                                // already-hosting group). A port==0 row is a portless group.
-                                // Provisioning rows are inert.
-                                enabled: root.hosting-enabled && row.status != "provisioning" && (row.port != 0 || row.host-state == "hosting");
-                                clicked => {
-                                    if (row.host-state == "hosting") {
-                                        root.stop(row.tunnel-id);
-                                    } else {
-                                        root.host(row.tunnel-id);
-                                    }
-                                }
-                            }
-                            TxtButton {
-                                text: Strings.btn-copy;
-                                enabled: row.url != "";
-                                clicked => {
-                                    root.copy-url(row.url);
-                                }
-                            }
-                            TxtButton {
-                                text: Strings.btn-open;
-                                enabled: row.url != "";
-                                clicked => {
-                                    root.open-url(row.url);
-                                }
-                            }
-                            TxtButton {
-                                text: Strings.btn-del-port;
-                                danger: true;
-                                // A port==0 row is a group with no ports yet; provisioning rows are inert.
-                                enabled: row.port != 0 && row.status != "provisioning";
-                                clicked => {
-                                    root.request-delete-port(row.group, row.tunnel-id, row.port);
-                                }
-                            }
-                            TxtButton {
-                                text: Strings.btn-del-group;
-                                danger: true;
-                                enabled: row.status != "provisioning";
-                                clicked => {
-                                    root.request-delete-group(row.group, row.tunnel-id);
-                                }
-                            }
-                        }
+                    copy-url(url) => {
+                        root.do-copy(url);
                     }
-                }
+                    open-url(url) => {
+                        root.open-url(url);
                     }
-
-                    // Inline detail panel under the selected row.
-                    if expanded : HorizontalLayout {
-                        padding-left: Theme.pad;
-                        padding-right: Theme.pad;
-                        PortDetailPanel {
-                            height: Theme.detail-height;
-                            upload-total: root.detail-upload-total;
-                            upload-rate: root.detail-upload-rate;
-                            download-total: root.detail-download-total;
-                            download-rate: root.detail-download-rate;
-                            connections: root.detail-connections;
-                            log-lines: root.detail-logs;
-                        }
+                    delete-port(port) => {
+                        root.request-delete-port(g.group, g.tunnel-id, port);
+                    }
+                    delete-group => {
+                        root.request-delete-group(g.group, g.tunnel-id);
+                    }
+                    toggle-detail(idx, tid, port) => {
+                        root.toggle-detail(idx, tid, port);
                     }
                 }
             }
         }
+
+        // ---- Bottom bar ----
+        Rectangle {
+            height: Theme.topbar-height;
+            HorizontalLayout {
+                padding: Theme.pad;
+                alignment: end;
+                TxtButton {
+                    text: Strings.btn-create-group;
+                    primary: true;
+                    clicked => {
+                        root.show-create-group = true;
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- Toast (bottom center, above the bottom bar) ----
+    toast := Toast {
+        message: Strings.toast-copied;
+        x: (parent.width - self.width) / 2;
+        y: parent.height - self.height - Theme.topbar-height - Theme.gap;
     }
 
     // ---- Modal overlays (drawn on top of the content) ----

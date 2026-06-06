@@ -1,0 +1,188 @@
+// Surface card for one group (tunnel): header (name, expiration pill,
+// Host toggle, de-emphasised delete) over a list of PortRows.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { Pill } from "pill.slint";
+import { Toggle } from "toggle.slint";
+import { IconButton } from "icon-button.slint";
+import { PortRow, PortView } from "port-row.slint";
+import { PortDetailPanel } from "port-detail.slint";
+export { PortView }
+
+// One group (tunnel) with its ports, as shown in the main list.
+export struct GroupView {
+    group: string,        // friendly name (falls back to tunnel-id)
+    tunnel-id: string,    // Real Tunnel ID (stable service key); empty for placeholders
+    expiration: string,
+    hosting: bool,        // the group is being hosted (drives the Host toggle)
+    host-state: string,   // "" | "hosting" (this session) | "external" (another session)
+    provisioning: bool,   // optimistic placeholder for an in-flight create — inert
+    has-port: bool,       // at least one real port (gates Host)
+    ports: [PortView],
+}
+
+export component GroupCard inherits Rectangle {
+    in property <GroupView> gv;
+    // True only in the `hosting` build; gates the Host/Stop toggle.
+    in property <bool> hosting-enabled: false;
+    // Index of the expanded row in the flat model (-1 = none). A port's detail
+    // panel is shown when its `row-index` matches (issue #17).
+    in property <int> selected-index: -1;
+    // Pre-formatted metric values for the selected port ("n/a" when missing).
+    in property <string> detail-upload-total;
+    in property <string> detail-upload-rate;
+    in property <string> detail-download-total;
+    in property <string> detail-download-rate;
+    in property <string> detail-connections;
+    // Most recent captured log lines (oldest first).
+    in property <[string]> detail-logs;
+    callback host();
+    callback stop();
+    callback copy-url(string);
+    callback open-url(string);
+    callback delete-port(int /*port*/);
+    callback delete-group();
+    // Row click: expand/collapse the detail panel for (row-index, tunnel-id, port).
+    callback toggle-detail(int /*row-index*/, string /*tunnel-id*/, int /*port*/);
+
+    height: layout.preferred-height;
+    background: Theme.surface;
+    border-width: 1px;
+    border-color: Theme.border;
+    border-radius: Theme.radius;
+
+    header-hover := TouchArea { }
+
+    layout := VerticalLayout {
+        padding-bottom: Theme.gap-sm;
+
+        // ---- Header ----
+        Rectangle {
+            height: Theme.card-header-height;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                spacing: Theme.gap;
+
+                Text {
+                    text: gv.group;
+                    color: Theme.text;
+                    font-size: Theme.fs-section;
+                    font-weight: 700;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    // Placeholders show the provisioning badge instead of expiration.
+                    if gv.provisioning || gv.expiration != "" : Pill {
+                        text: gv.provisioning
+                            ? Strings.badge-provisioning
+                            : "\{Strings.expires-label} \{gv.expiration}";
+                        accent: gv.provisioning;
+                    }
+                }
+                // "Hosted elsewhere": the service reports active connections but
+                // this session is not hosting the group (issue #15).
+                VerticalLayout {
+                    alignment: center;
+                    if gv.host-state == "external" : Pill {
+                        text: Strings.badge-hosted-external;
+                    }
+                }
+
+                Rectangle { horizontal-stretch: 1; }
+
+                Text {
+                    text: gv.hosting ? Strings.btn-stop : Strings.btn-host;
+                    color: Theme.muted;
+                    font-size: Theme.fs-caption;
+                    vertical-alignment: center;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    Toggle {
+                        checked: gv.hosting;
+                        // Hosting a portless group forwards nothing, so only enable
+                        // Host when the group has a port (or to Stop an already-
+                        // hosting group). Placeholders are inert.
+                        enabled: root.hosting-enabled && !gv.provisioning && (gv.has-port || gv.hosting);
+                        toggled(on) => {
+                            if (on) {
+                                root.host();
+                            } else {
+                                root.stop();
+                            }
+                        }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    IconButton {
+                        glyph: "✕";
+                        tip: Strings.btn-del-group;
+                        revealed: header-hover.has-hover;
+                        danger: true;
+                        enabled: !gv.provisioning;
+                        clicked => {
+                            root.delete-group();
+                        }
+                    }
+                }
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
+        // ---- Ports ----
+        for p in gv.ports : VerticalLayout {
+            PortRow {
+                pv: p;
+                selected: p.row-index >= 0 && p.row-index == root.selected-index;
+                copy-url(url) => {
+                    root.copy-url(url);
+                }
+                open-url(url) => {
+                    root.open-url(url);
+                }
+                delete-port(port) => {
+                    root.delete-port(port);
+                }
+                toggle-detail(idx, port) => {
+                    root.toggle-detail(idx, gv.tunnel-id, port);
+                }
+            }
+            // Inline metrics/logs panel under the selected port (issue #17).
+            if p.row-index >= 0 && p.row-index == root.selected-index : HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                padding-bottom: Theme.gap-sm;
+                PortDetailPanel {
+                    height: Theme.detail-height;
+                    upload-total: root.detail-upload-total;
+                    upload-rate: root.detail-upload-rate;
+                    download-total: root.detail-download-total;
+                    download-rate: root.detail-download-rate;
+                    connections: root.detail-connections;
+                    log-lines: root.detail-logs;
+                }
+            }
+        }
+        // A group with no ports yet (port not configured).
+        if gv.ports.length == 0 && !gv.provisioning : Rectangle {
+            height: Theme.row-height;
+            HorizontalLayout {
+                padding-left: Theme.pad;
+                padding-right: Theme.pad;
+                Text {
+                    text: Strings.no-url;
+                    color: Theme.muted;
+                    font-size: Theme.fs-body;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+}

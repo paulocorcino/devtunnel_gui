@@ -1,0 +1,38 @@
+// Centered "No groups yet" card with a primary "+ Create group" action.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+
+export component EmptyState inherits Rectangle {
+    callback create-group();
+
+    card := Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: Theme.empty-card-width;
+        height: content.preferred-height;
+        background: Theme.surface;
+        border-width: 1px;
+        border-color: Theme.border;
+        border-radius: Theme.radius;
+
+        content := VerticalLayout {
+            padding: Theme.gap-lg * 2;
+            spacing: Theme.gap-lg;
+            Text {
+                text: Strings.empty-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+            TxtButton {
+                text: Strings.btn-create-group;
+                primary: true;
+                clicked => {
+                    root.create-group();
+                }
+            }
+        }
+    }
+}
