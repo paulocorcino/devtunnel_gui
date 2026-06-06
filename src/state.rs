@@ -241,6 +241,7 @@ mod tests {
             protocol: "http".into(),
             url: "https://frontend-3000.brs.devtunnels.ms/".into(),
             expiration: "30d".into(),
+            host_connections: 0,
         }];
         save_row_cache_to(&path, &rows);
         let loaded = load_row_cache_from(&path);
