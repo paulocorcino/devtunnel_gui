@@ -21,6 +21,15 @@ you only produce a plan that a later execution loop will consume.
    <one or two sentences. If "no", explain what is missing — the loop will
    skip the issue and leave a comment.>
 
+   ## Execution model: sonnet | opus
+   <one line justifying the choice. Pick the SMALLEST model that will do this
+   reliably: `sonnet` for mechanical, localized, well-understood changes (add a
+   string, a field, a UI binding, a straightforward refactor) — Sonnet handles
+   these easily; `opus` only when the work is genuinely complex (cross-cutting
+   changes, tricky concurrency/lifetimes/type-plumbing, subtle correctness, or
+   ambiguous design needing judgment). Default to `sonnet` unless a concrete
+   complexity makes `opus` necessary.>
+
    ## Done when
    - <a concrete, checkable condition, e.g. "cargo test passes and `xyz`
      behaves as ...">

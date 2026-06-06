@@ -92,7 +92,15 @@ async fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<Host
                 let ports = match collect_ports(&tunnel_id, &loc) {
                     Ok(ports) => ports,
                     Err(e) => {
-                        emit(&events, &tunnel_id, HostState::Error(e.to_string()));
+                        let msg = e.to_string();
+                        // An expired/absent CLI sign-in is not a generic error:
+                        // surface it so the UI can offer "Sign in".
+                        if devtunnel::is_login_expired(&msg) {
+                            let _ = events.send(HostEvent::ReloginRequired {
+                                tunnel_id: tunnel_id.clone(),
+                            });
+                        }
+                        emit(&events, &tunnel_id, HostState::Error(msg));
                         continue;
                     }
                 };
@@ -162,6 +170,18 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
                 }
             }
             Err(e) => {
+                let msg = e.to_string();
+                // Token mint / connect failed because the CLI sign-in expired:
+                // retrying is pointless until the user re-authenticates, so end
+                // the task (auto-resume re-hosts after a successful sign-in).
+                if devtunnel::is_login_expired(&msg) {
+                    log::warn!("host engine: {tunnel_id} login expired: {msg}");
+                    let _ = events.send(HostEvent::ReloginRequired {
+                        tunnel_id: tunnel_id.clone(),
+                    });
+                    emit(&events, &tunnel_id, HostState::Error(msg));
+                    return;
+                }
                 log::warn!("host engine: {tunnel_id} connect failed: {e}");
                 first_attempt = false;
             }
