@@ -1,4 +1,4 @@
-//! Start-with-Windows toggle (issue #5): an entry in the per-user
+//! Start-with-Windows toggle: an entry in the per-user
 //! `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` key pointing at the
 //! current executable. No elevation required (HKCU, not HKLM). The app already
 //! starts minimized to the tray, so auto-start never pops a window at logon.
@@ -48,6 +48,15 @@ pub fn disable() -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
+    }
+}
+
+/// Applies the requested auto-start state: enables or disables the Run entry.
+pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
+    if enabled {
+        enable()
+    } else {
+        disable()
     }
 }
 

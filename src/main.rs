@@ -248,22 +248,42 @@ fn main() -> anyhow::Result<()> {
         app_state.borrow_mut().settings.auto_start = enabled;
     }
     {
+        let weak = app.as_weak();
         let app_state = app_state.clone();
         app.on_auto_start_changed(move |enabled| {
             #[cfg(windows)]
             {
-                let result = if enabled {
-                    autostart::enable()
-                } else {
-                    autostart::disable()
-                };
-                if let Err(e) = result {
+                if let Err(e) = autostart::set_enabled(enabled) {
                     log::warn!("autostart: failed to apply toggle: {e}");
                 }
+                // Re-read the registry so the checkbox reflects the actual state
+                // (reverts the optimistic toggle if the write failed).
+                let actual = autostart::is_enabled();
+                if let Some(a) = weak.upgrade() {
+                    a.set_auto_start_enabled(actual);
+                }
+                let mut st = app_state.borrow_mut();
+                st.settings.auto_start = actual;
+                st.save();
             }
-            let mut st = app_state.borrow_mut();
-            st.settings.auto_start = enabled;
-            st.save();
+            #[cfg(not(windows))]
+            {
+                let mut st = app_state.borrow_mut();
+                st.settings.auto_start = enabled;
+                st.save();
+            }
+        });
+    }
+    {
+        // Re-sync the toggle from the registry each time the Settings dialog
+        // opens, in case the Run entry changed out of band, then show it.
+        let weak = app.as_weak();
+        app.on_open_settings(move || {
+            if let Some(a) = weak.upgrade() {
+                #[cfg(windows)]
+                a.set_auto_start_enabled(autostart::is_enabled());
+                a.set_show_settings(true);
+            }
         });
     }
 
@@ -1019,6 +1039,8 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_btn_refresh(loc.t("btn-refresh").into());
     s.set_btn_new_group(loc.t("btn-new-group").into());
     s.set_btn_add_port(loc.t("btn-add-port").into());
+    s.set_btn_settings(loc.t("btn-settings").into());
+
     s.set_no_url(loc.t("no-url").into());
     s.set_expires_label(loc.t("expires-label").into());
     s.set_btn_copy(loc.t("btn-copy").into());
@@ -1065,7 +1087,6 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_ph_port(loc.t("ph-port").into());
 
     // Settings
-    s.set_btn_settings(loc.t("btn-settings").into());
     s.set_settings_title(loc.t("settings-title").into());
     s.set_field_auto_start(loc.t("field-auto-start").into());
     s.set_field_probe_interval(loc.t("field-probe-interval").into());

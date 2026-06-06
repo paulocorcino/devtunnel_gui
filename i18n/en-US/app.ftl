@@ -13,6 +13,7 @@ status-error = error: { $message }
 btn-refresh = Refresh
 btn-new-group = New group
 btn-add-port = Add port
+btn-settings = Settings
 
 ## Row actions
 btn-del-port = Delete port
@@ -76,7 +77,6 @@ badge-down = Down
 badge-provisioning = Provisioning…
 
 ## Settings
-btn-settings = Settings
 settings-title = Settings
 field-auto-start = Start with Windows
 field-probe-interval = Probe interval (seconds)

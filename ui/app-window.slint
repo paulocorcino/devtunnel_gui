@@ -76,6 +76,9 @@ export component AppWindow inherits Window {
     in property <bool> relogin-required: false;
 
     callback refresh();
+    // Asks Rust to re-sync `auto-start-enabled` from the registry, then open the
+    // Settings dialog.
+    callback open-settings();
     // The user toggled the auto-start checkbox in the settings dialog.
     callback auto-start-changed(bool);
     // The user clicked "Sign in" in the re-login banner.
@@ -116,6 +119,12 @@ export component AppWindow inherits Window {
                 Rectangle { horizontal-stretch: 1; }
                 Pill { text: root.status; }
                 TxtButton {
+                    text: Strings.btn-settings;
+                    clicked => {
+                        root.open-settings();
+                    }
+                }
+                TxtButton {
                     text: Strings.btn-new-group;
                     clicked => {
                         root.show-create-group = true;
@@ -132,12 +141,6 @@ export component AppWindow inherits Window {
                     primary: true;
                     clicked => {
                         root.refresh();
-                    }
-                }
-                TxtButton {
-                    text: Strings.btn-settings;
-                    clicked => {
-                        root.show-settings = true;
                     }
                 }
             }
