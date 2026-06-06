@@ -1,19 +1,22 @@
 // Hide the console window on Windows in release builds (tray app).
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+#[cfg(windows)]
+mod autostart;
 mod devtunnel;
 mod host;
 mod locale;
 mod model;
 #[cfg(feature = "hosting")]
 mod probe;
+mod state;
 
 slint::include_modules!();
 
 use fluent_bundle::FluentArgs;
 use locale::Locale;
 use slint::{CloseRequestResponse, ComponentHandle, ModelRc, SharedString, VecModel};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::mpsc::Sender;
@@ -62,6 +65,9 @@ struct LiveState {
     placeholders: Vec<Placeholder>,
     /// Monotonic counter for placeholder ids.
     next_placeholder_id: u64,
+    /// Optimistic hidden-delete keys for in-flight delete operations.
+    /// `(tunnel_id, None)` hides the whole group; `(tunnel_id, Some(port))` hides one port.
+    hidden: HashSet<(String, Option<i32>)>,
 }
 
 impl LiveState {
@@ -79,6 +85,16 @@ impl LiveState {
 
     fn remove_placeholder(&mut self, id: u64) {
         self.placeholders.retain(|p| p.id != id);
+    }
+
+    fn hide_delete(&mut self, tunnel_id: String, port: Option<i32>) -> (String, Option<i32>) {
+        let key = (tunnel_id, port);
+        self.hidden.insert(key.clone());
+        key
+    }
+
+    fn unhide_delete(&mut self, key: &(String, Option<i32>)) {
+        self.hidden.remove(key);
     }
 }
 
@@ -193,10 +209,21 @@ fn main() -> anyhow::Result<()> {
     // The UI thread (timer) applies the result to the window and rebuilds the
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
     // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
-    let (tx, rx) = std::sync::mpsc::channel::<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>();
+    let (tx, rx) = std::sync::mpsc::channel::<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>();
+
+    // Preflight results (startup probe + after sign-in) pumped to the UI thread.
+    let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
 
     // Derived live state (probe/host status per row), shared on the UI thread.
     let state: Rc<RefCell<LiveState>> = Rc::new(RefCell::new(LiveState::default()));
+
+    // Persistent app state (auto-host set + settings), loaded once on startup and
+    // saved best-effort whenever the auto-host set or settings change.
+    let app_state: Rc<RefCell<state::AppState>> = Rc::new(RefCell::new(state::AppState::load()));
 
     // ---- Host + probe engines ----
     // The host engine starts in every build (it is a no-op without `hosting`);
@@ -209,12 +236,65 @@ fn main() -> anyhow::Result<()> {
     let (probe_evt_rx, probe_cmd_tx) = {
         let (probe_evt_tx, probe_evt_rx) = std::sync::mpsc::channel::<probe::ProbeEvent>();
         let probe_cmd_tx = probe::spawn(probe_evt_tx);
+        // Apply the persisted steady-state cadence (conservative 60 s default;
+        // clamped to >= 1 s so a hand-edited 0 cannot busy-loop the probe).
+        let secs = app_state.borrow().settings.probe_interval_secs.max(1);
+        let _ = probe_cmd_tx.send(probe::ProbeCommand::SetInterval(Duration::from_secs(secs)));
         (probe_evt_rx, probe_cmd_tx)
     };
 
     // The default (non-hosting) build shows the toggle disabled.
     #[cfg(feature = "hosting")]
     app.set_hosting_enabled(true);
+
+    // ---- Settings: auto-start (start with Windows) ----
+    // The registry is the source of truth for the checkbox (the user may have
+    // removed the Run entry externally); the persisted setting follows it.
+    #[cfg(windows)]
+    {
+        let enabled = autostart::is_enabled();
+        app.set_auto_start_enabled(enabled);
+        app_state.borrow_mut().settings.auto_start = enabled;
+    }
+    {
+        let weak = app.as_weak();
+        let app_state = app_state.clone();
+        app.on_auto_start_changed(move |enabled| {
+            #[cfg(windows)]
+            {
+                if let Err(e) = autostart::set_enabled(enabled) {
+                    log::warn!("autostart: failed to apply toggle: {e}");
+                }
+                // Re-read the registry so the checkbox reflects the actual state
+                // (reverts the optimistic toggle if the write failed).
+                let actual = autostart::is_enabled();
+                if let Some(a) = weak.upgrade() {
+                    a.set_auto_start_enabled(actual);
+                }
+                let mut st = app_state.borrow_mut();
+                st.settings.auto_start = actual;
+                st.save();
+            }
+            #[cfg(not(windows))]
+            {
+                let mut st = app_state.borrow_mut();
+                st.settings.auto_start = enabled;
+                st.save();
+            }
+        });
+    }
+    {
+        // Re-sync the toggle from the registry each time the Settings dialog
+        // opens, in case the Run entry changed out of band, then show it.
+        let weak = app.as_weak();
+        app.on_open_settings(move || {
+            if let Some(a) = weak.upgrade() {
+                #[cfg(windows)]
+                a.set_auto_start_enabled(autostart::is_enabled());
+                a.set_show_settings(true);
+            }
+        });
+    }
 
     // ---- UI callbacks ----
     app.on_copy_url(|url| copy(&url));
@@ -226,8 +306,35 @@ fn main() -> anyhow::Result<()> {
         app.on_refresh(move || load_async(&weak, &tx, &loc));
     }
 
+    // ---- Sign in (re-login banner) ----
+    // Runs `devtunnel user login` on a background thread (interactive — opens
+    // the browser), then re-runs preflight; the pump applies the new state and
+    // reloads when it is Ok. On failure preflight re-detects LoggedOut, so the
+    // banner simply stays up.
+    {
+        let weak = app.as_weak();
+        let pf_tx = pf_tx.clone();
+        let loc = loc.clone();
+        app.on_sign_in(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_status(loc.t("status-signing-in").into());
+            }
+            let pf_tx = pf_tx.clone();
+            let lang = locale::system_locale();
+            std::thread::spawn(move || {
+                let loc = Locale::load(&lang);
+                let _ = devtunnel::user_login(&loc);
+                let _ = pf_tx.send(devtunnel::preflight());
+            });
+        });
+    }
+
     // Pending deletion (set when a delete is requested, consumed on confirm).
     let pending: Rc<RefCell<Option<PendingDelete>>> = Rc::new(RefCell::new(None));
+
+    // One-shot flag: re-host the persisted auto-host groups after the next
+    // successful load (set at startup and again after a successful re-login).
+    let auto_resume_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
 
     // ---- Create group ----
     {
@@ -260,6 +367,7 @@ fn main() -> anyhow::Result<()> {
                     "status-creating-group",
                     &loc,
                     Some(placeholder_id),
+                    None,
                     move |loc| devtunnel::create_group(&opts, loc).map(|_| ()),
                 );
             },
@@ -319,6 +427,7 @@ fn main() -> anyhow::Result<()> {
                     "status-adding-port",
                     &loc,
                     Some(placeholder_id),
+                    None,
                     move |loc| {
                         let tunnel_id = if group_id.is_empty() {
                             devtunnel::create_group(
@@ -387,18 +496,26 @@ fn main() -> anyhow::Result<()> {
         let tx = tx.clone();
         let loc = loc.clone();
         let pending = pending.clone();
+        let state = state.clone();
+        let tray = tray.clone();
+        let actions = actions.clone();
         app.on_confirm_accept(move || {
             let Some(p) = pending.borrow_mut().take() else {
                 return;
             };
             let tunnel_id = p.tunnel_id;
             let port = p.port;
+            let hidden_key = state.borrow_mut().hide_delete(tunnel_id.clone(), port);
+            if let Some(a) = weak.upgrade() {
+                rebuild_rows(&a, &tray, &actions, &state, &loc);
+            }
             run_op_async(
                 &weak,
                 &tx,
                 "status-deleting",
                 &loc,
                 None,
+                Some(hidden_key),
                 move |loc| match port {
                     Some(pn) => devtunnel::delete_port(&tunnel_id, pn, loc),
                     None => devtunnel::delete_group(&tunnel_id, loc),
@@ -418,11 +535,18 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let app_state = app_state.clone();
         app.on_host(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Host {
                 tunnel_id: id.clone(),
             });
+            // Track the group as auto-host so it is re-hosted on next startup.
+            {
+                let mut st = app_state.borrow_mut();
+                st.add_auto_host(&id);
+                st.save();
+            }
             state.borrow_mut().host.insert(id, "host".to_string());
             if let Some(a) = weak.upgrade() {
                 rebuild_rows(&a, &tray, &actions, &state, &loc);
@@ -436,11 +560,18 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         let loc = loc.clone();
+        let app_state = app_state.clone();
         app.on_stop(move |tunnel_id| {
             let id = tunnel_id.to_string();
             host.send(host::HostCommand::Stop {
                 tunnel_id: id.clone(),
             });
+            // An explicit Stop removes the group from the auto-host set.
+            {
+                let mut st = app_state.borrow_mut();
+                st.remove_auto_host(&id);
+                st.save();
+            }
             let mut st = state.borrow_mut();
             st.host.remove(&id);
             // Drop probe results for this group's ports so badges clear.
@@ -462,6 +593,10 @@ fn main() -> anyhow::Result<()> {
         let actions = actions.clone();
         let loc = loc.clone();
         let state = state.clone();
+        let app_state = app_state.clone();
+        let tunnel_host = tunnel_host.clone();
+        let auto_resume_pending = auto_resume_pending.clone();
+        let tx = tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -484,43 +619,126 @@ fn main() -> anyhow::Result<()> {
                         toggle_window(&weak);
                     }
                 }
+                // Preflight results -> set app-state, swap the tray icon, and
+                // kick the initial load when the environment is ready.
+                while let Ok(pf) = pf_rx.try_recv() {
+                    let app_state = match pf {
+                        devtunnel::Preflight::Ok => "ready",
+                        devtunnel::Preflight::CliMissing => "cli-missing",
+                        devtunnel::Preflight::LoggedOut => "relogin",
+                    };
+                    if let Some(a) = weak.upgrade() {
+                        a.set_app_state(app_state.into());
+                    }
+                    update_tray_icon(&tray, app_state);
+                    if pf == devtunnel::Preflight::Ok {
+                        // A successful preflight (startup or after re-login) re-arms
+                        // the one-shot auto-resume so persisted auto-host groups are
+                        // re-hosted once the upcoming load lands.
+                        auto_resume_pending.set(true);
+                        load_async(&weak, &tx, &loc);
+                    }
+                }
                 // Load result: apply to UI and rebuild tray menu.
                 let mut loaded = false;
-                while let Ok((placeholder_id, result)) = rx.try_recv() {
-                    apply_rows(&weak, &tray, &actions, &state, placeholder_id, result, &loc);
+                // Tracks whether at least one *successful* load landed this tick;
+                // a failed first fetch must not consume the one-shot auto-resume.
+                let mut load_ok = false;
+                while let Ok((placeholder_id, hidden_key, result)) = rx.try_recv() {
+                    if apply_rows(
+                        &weak,
+                        &tray,
+                        &actions,
+                        &state,
+                        placeholder_id,
+                        hidden_key,
+                        result,
+                        &loc,
+                    ) {
+                        load_ok = true;
+                    }
                     loaded = true;
                 }
 
                 // Host engine state changes -> update per-group host state.
                 let mut host_changed = false;
-                while let Ok(host::HostEvent::State {
-                    tunnel_id,
-                    state: hs,
-                }) = host_evt_rx.try_recv()
-                {
-                    log::debug!("host event: {tunnel_id} -> {hs:?}");
-                    // Surface connection failures in the status bar (otherwise a failed
-                    // Host is silent and looks like "nothing happened").
-                    if let host::HostState::Error(msg) = &hs {
-                        if let Some(a) = weak.upgrade() {
-                            let mut args = FluentArgs::new();
-                            args.set("message", msg.clone());
-                            a.set_status(loc.t_args("status-error", &args).into());
+                while let Ok(ev) = host_evt_rx.try_recv() {
+                    match ev {
+                        host::HostEvent::State {
+                            tunnel_id,
+                            state: hs,
+                        } => {
+                            log::debug!("host event: {tunnel_id} -> {hs:?}");
+                            // Surface connection failures in the status bar (otherwise a failed
+                            // Host is silent and looks like "nothing happened").
+                            if let host::HostState::Error(msg) = &hs {
+                                if let Some(a) = weak.upgrade() {
+                                    let mut args = FluentArgs::new();
+                                    args.set("message", msg.clone());
+                                    a.set_status(loc.t_args("status-error", &args).into());
+                                    // Login expiry during hosting switches the app
+                                    // into the re-login state (banner + warning
+                                    // tray icon).
+                                    if devtunnel::is_auth_error(msg) {
+                                        a.set_app_state("relogin".into());
+                                        update_tray_icon(&tray, "relogin");
+                                    }
+                                }
+                            }
+                            let id = map_host_state(&hs);
+                            let mut st = state.borrow_mut();
+                            match id {
+                                Some(v) => {
+                                    st.host.insert(tunnel_id, v.to_string());
+                                }
+                                None => {
+                                    // Stopped / Idle / Error: clear host + probe for the group.
+                                    st.host.remove(&tunnel_id);
+                                    st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                                }
+                            }
+                            host_changed = true;
+                        }
+                        host::HostEvent::ReloginRequired { tunnel_id } => {
+                            log::warn!("host: re-login required (reported for {tunnel_id})");
+                            // Enter the re-login state: banner + alert tray icon +
+                            // a single Windows toast. The banner stays up until a
+                            // successful sign-in flips preflight back to Ok.
+                            if let Some(a) = weak.upgrade() {
+                                if a.get_app_state() != "relogin" {
+                                    a.set_app_state("relogin".into());
+                                    a.set_status(loc.t("relogin-message").into());
+                                    update_tray_icon(&tray, "relogin");
+                                    #[cfg(windows)]
+                                    show_relogin_toast(&loc);
+                                }
+                            }
                         }
                     }
-                    let id = map_host_state(&hs);
-                    let mut st = state.borrow_mut();
-                    match id {
-                        Some(v) => {
-                            st.host.insert(tunnel_id, v.to_string());
-                        }
-                        None => {
-                            // Stopped / Idle / Error: clear host + probe for the group.
-                            st.host.remove(&tunnel_id);
-                            st.probe.retain(|(tid, _), _| tid != &tunnel_id);
+                }
+
+                // One-shot auto-resume (hosting build): after a successful load,
+                // re-host every persisted auto-host group that resolves to a known
+                // Real Tunnel ID with at least one port; log the skipped ones.
+                if cfg!(feature = "hosting") && load_ok && auto_resume_pending.get() {
+                    auto_resume_pending.set(false);
+                    let ids = app_state.borrow().auto_host.clone();
+                    if !ids.is_empty() {
+                        let mut st = state.borrow_mut();
+                        for id in &ids {
+                            let known = st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
+                            if known {
+                                log::info!("auto-resume: hosting {id}");
+                                tunnel_host.send(host::HostCommand::Host {
+                                    tunnel_id: id.clone(),
+                                });
+                                st.host.insert(id.clone(), "host".to_string());
+                                host_changed = true;
+                            } else {
+                                log::info!("auto-resume: skipping unknown or portless group {id}");
+                            }
                         }
                     }
-                    host_changed = true;
                 }
 
                 // Probe results -> update per-port health status.
@@ -562,8 +780,26 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    // ---- Initial load ----
-    load_async(&app.as_weak(), &tx, &loc);
+    // ---- Initial paint from the row cache (last successful load). Keeps the UI
+    // useful instantly; the async refresh below reconciles from the service once
+    // preflight reports the environment is ready.
+    {
+        let cached = state::load_row_cache();
+        if !cached.is_empty() {
+            state.borrow_mut().rows = cached;
+            rebuild_rows(&app, &tray, &actions, &state, &loc);
+        }
+    }
+
+    // ---- Initial preflight (background) ----
+    // Sets app-state from the probe; the pump kicks the first load only when
+    // the environment is ready (CLI present + logged in).
+    {
+        let pf_tx = pf_tx.clone();
+        std::thread::spawn(move || {
+            let _ = pf_tx.send(devtunnel::preflight());
+        });
+    }
 
     // Start minimized to tray: never call `show()`, just run the event loop.
     // The window appears via tray icon click or the "Open window" menu item.
@@ -610,7 +846,11 @@ fn open_browser(url: &str) {
 /// Fires the fetch on a background thread; the result comes back via `Sender`.
 fn load_async(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
+    tx: &Sender<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>,
     loc: &Rc<Locale>,
 ) {
     if let Some(a) = weak.upgrade() {
@@ -620,7 +860,7 @@ fn load_async(
     let lang = locale::system_locale();
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
-        let _ = tx.send((None, devtunnel::fetch_rows(&loc)));
+        let _ = tx.send((None, None, devtunnel::fetch_rows(&loc)));
     });
 }
 
@@ -628,12 +868,18 @@ fn load_async(
 /// The op's success feeds straight into `fetch_rows`, so the same `apply_rows`
 /// path reconciles the UI (and tray) from the service after every mutation.
 /// `placeholder` is the id of an optimistic placeholder row to remove when done.
+/// `hidden_key` is the hidden-delete key to clear when the op settles.
 fn run_op_async<F>(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(Option<u64>, anyhow::Result<Vec<devtunnel::Row>>)>,
+    tx: &Sender<(
+        Option<u64>,
+        Option<(String, Option<i32>)>,
+        anyhow::Result<Vec<devtunnel::Row>>,
+    )>,
     status_key: &str,
     loc: &Rc<Locale>,
     placeholder: Option<u64>,
+    hidden_key: Option<(String, Option<i32>)>,
     op: F,
 ) where
     F: FnOnce(&Locale) -> anyhow::Result<()> + Send + 'static,
@@ -646,26 +892,35 @@ fn run_op_async<F>(
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
         let result = op(&loc).and_then(|()| devtunnel::fetch_rows(&loc));
-        let _ = tx.send((placeholder, result));
+        let _ = tx.send((placeholder, hidden_key, result));
     });
 }
 
 /// Applies a load result: fills the list and rebuilds the tray menu.
-/// Always runs on the UI thread (called by the timer).
+/// Always runs on the UI thread (called by the timer). Returns `true` when the
+/// load succeeded (used to trigger the one-shot auto-resume).
 fn apply_rows(
     weak: &slint::Weak<AppWindow>,
     tray: &tray_icon::TrayIcon,
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
     state: &Rc<RefCell<LiveState>>,
     placeholder_id: Option<u64>,
+    hidden_key: Option<(String, Option<i32>)>,
     result: anyhow::Result<Vec<devtunnel::Row>>,
     loc: &Rc<Locale>,
-) {
-    let Some(app) = weak.upgrade() else { return };
+) -> bool {
+    let Some(app) = weak.upgrade() else {
+        return false;
+    };
 
     // Remove the optimistic placeholder whether the op succeeded or failed.
     if let Some(id) = placeholder_id {
         state.borrow_mut().remove_placeholder(id);
+    }
+
+    // Clear the hidden-delete key on both success and error so the row is restored on failure.
+    if let Some(ref key) = hidden_key {
+        state.borrow_mut().unhide_delete(key);
     }
 
     match result {
@@ -690,19 +945,30 @@ fn apply_rows(
 
             // Cache the load and rebuild the row model (status/host-state derived
             // from the latest probe/host events), then refresh probe targets.
+            // Also persist the rows so the next startup paints immediately.
+            state::save_row_cache(&rows);
             state.borrow_mut().rows = rows;
             rebuild_rows(&app, tray, actions, state, loc);
 
             let mut args = FluentArgs::new();
             args.set("count", count as i64);
             app.set_status(loc.t_args("status-port-count", &args).into());
+            true
         }
         Err(e) => {
-            // Rebuild so that the removed placeholder is no longer shown.
+            // Rebuild so that the removed placeholder / restored hidden row is reflected.
             rebuild_rows(&app, tray, actions, state, loc);
+            let msg = e.to_string();
+            // Login expiry during management switches the app into the
+            // re-login state (banner + warning tray icon).
+            if devtunnel::is_auth_error(&msg) {
+                app.set_app_state("relogin".into());
+                update_tray_icon(tray, "relogin");
+            }
             let mut args = FluentArgs::new();
-            args.set("message", e.to_string());
+            args.set("message", msg);
             app.set_status(loc.t_args("status-error", &args).into());
+            false
         }
     }
 }
@@ -721,6 +987,10 @@ fn rebuild_rows(
     let mut model: Vec<PortRow> = st
         .rows
         .iter()
+        .filter(|r| {
+            !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+        })
         .map(|r| PortRow {
             group: r.group.clone().into(),
             tunnel_id: r.tunnel_id.clone().into(),
@@ -797,6 +1067,8 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_btn_refresh(loc.t("btn-refresh").into());
     s.set_btn_new_group(loc.t("btn-new-group").into());
     s.set_btn_add_port(loc.t("btn-add-port").into());
+    s.set_btn_settings(loc.t("btn-settings").into());
+
     s.set_no_url(loc.t("no-url").into());
     s.set_expires_label(loc.t("expires-label").into());
     s.set_btn_copy(loc.t("btn-copy").into());
@@ -835,6 +1107,14 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_ph_expiration(loc.t("ph-expiration").into());
     s.set_ph_description(loc.t("ph-description").into());
 
+    // Preflight banner / re-login
+    s.set_banner_cli_missing_title(loc.t("banner-cli-missing-title").into());
+    s.set_banner_cli_missing_body(loc.t("banner-cli-missing-body").into());
+    s.set_banner_cli_missing_install(loc.t("banner-cli-missing-install").into());
+    s.set_banner_relogin_title(loc.t("banner-relogin-title").into());
+    s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
+    s.set_btn_sign_in(loc.t("btn-sign-in").into());
+
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());
     s.set_field_group(loc.t("field-group").into());
@@ -842,6 +1122,15 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_protocol(loc.t("field-protocol").into());
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
+
+    // Settings
+    s.set_settings_title(loc.t("settings-title").into());
+    s.set_field_auto_start(loc.t("field-auto-start").into());
+    s.set_field_probe_interval(loc.t("field-probe-interval").into());
+    s.set_btn_close(loc.t("btn-close").into());
+
+    // Re-login
+    s.set_relogin_message(loc.t("relogin-message").into());
 }
 
 #[cfg(test)]
@@ -948,6 +1237,79 @@ mod tests {
         let st = make_state();
         assert_eq!(derive_status(&st, "t1", 3000, 0), "idle");
     }
+
+    fn make_row(tunnel_id: &str, port: i32) -> devtunnel::Row {
+        devtunnel::Row {
+            group: tunnel_id.to_string(),
+            tunnel_id: tunnel_id.to_string(),
+            port,
+            protocol: "http".into(),
+            url: "https://example.com".into(),
+            expiration: "30d".into(),
+            host_connections: 0,
+        }
+    }
+
+    #[test]
+    fn hidden_delete_insert_remove() {
+        let mut st = make_state();
+
+        let key1 = st.hide_delete("tid1".into(), Some(3000));
+        let key2 = st.hide_delete("tid2".into(), None);
+        assert_eq!(st.hidden.len(), 2);
+        assert!(st.hidden.contains(&("tid1".to_string(), Some(3000))));
+        assert!(st.hidden.contains(&("tid2".to_string(), None)));
+
+        st.unhide_delete(&key1);
+        assert_eq!(st.hidden.len(), 1);
+        assert!(!st.hidden.contains(&("tid1".to_string(), Some(3000))));
+
+        st.unhide_delete(&key2);
+        assert!(st.hidden.is_empty());
+    }
+
+    #[test]
+    fn hidden_port_excludes_matching_row() {
+        let mut st = make_state();
+        st.rows.push(make_row("tid1", 3000));
+        st.rows.push(make_row("tid1", 8080));
+
+        // Hide the port-3000 row; port-8080 should still be visible.
+        st.hide_delete("tid1".into(), Some(3000));
+
+        let visible: Vec<_> = st
+            .rows
+            .iter()
+            .filter(|r| {
+                !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                    && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+            })
+            .collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].port, 8080);
+    }
+
+    #[test]
+    fn hidden_group_excludes_all_ports() {
+        let mut st = make_state();
+        st.rows.push(make_row("tid1", 3000));
+        st.rows.push(make_row("tid1", 8080));
+        st.rows.push(make_row("tid2", 9000));
+
+        // Hide the entire group tid1; tid2's row should remain.
+        st.hide_delete("tid1".into(), None);
+
+        let visible: Vec<_> = st
+            .rows
+            .iter()
+            .filter(|r| {
+                !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
+                    && !st.hidden.contains(&(r.tunnel_id.clone(), None))
+            })
+            .collect();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].tunnel_id, "tid2");
+    }
 }
 
 /// Solid blue 32×32 icon (no asset file).
@@ -959,4 +1321,37 @@ fn build_icon() -> Icon {
     }
     // String literal kept here intentionally: build_icon() runs before Locale is loaded.
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Solid amber 32×32 warning icon shown while the app is not "ready"
+/// (CLI missing / re-login required).
+fn build_warning_icon() -> Icon {
+    const SIZE: u32 = 32;
+    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
+    for _ in 0..(SIZE * SIZE) {
+        rgba.extend_from_slice(&[0xf5, 0x9e, 0x0b, 0xff]); // amber
+    }
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Swaps the tray icon to match the app-level preflight state: the normal blue
+/// icon when "ready", the warning variant otherwise.
+fn update_tray_icon(tray: &tray_icon::TrayIcon, app_state: &str) {
+    let icon = if app_state == "ready" {
+        build_icon()
+    } else {
+        build_warning_icon()
+    };
+    let _ = tray.set_icon(Some(icon));
+}
+
+/// Fires the one-shot Windows toast for the re-login case (no toasts for any
+/// other status change). Best-effort: a toast failure is not worth surfacing.
+#[cfg(windows)]
+fn show_relogin_toast(loc: &Locale) {
+    use tauri_winrt_notification::Toast;
+    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
+        .title(&loc.t("toast-relogin-title"))
+        .text1(&loc.t("toast-relogin-body"))
+        .show();
 }
