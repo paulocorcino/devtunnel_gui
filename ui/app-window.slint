@@ -4,6 +4,8 @@ import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
 import { CreateGroupDialog, AddPortDialog, ConfirmDialog, GroupItem } from "dialogs.slint";
 import { PortDetailPanel } from "port-detail.slint";
+import { PreflightBanner } from "banner.slint";
+import { SettingsDialog } from "settings.slint";
 export { Strings }
 
 // One row = one port of a group (tunnel), with its Public URL.
@@ -15,7 +17,7 @@ export struct PortRow {
     url: string,
     expiration: string,
     status: string, // "idle" | "ok" | "warn" | "down" | "host" | "provisioning"  (see theme.slint)
-    host-state: string, // "" (not hosting) | "hosting" — drives the group toggle label
+    host-state: string, // "" (not hosting) | "hosting" (this session) | "external" (another session)
 }
 
 // Status dot colored by state.
@@ -65,6 +67,7 @@ export component AppWindow inherits Window {
     in-out property <bool> show-create-group;
     in-out property <bool> show-add-port;
     in-out property <bool> show-confirm;
+    in-out property <bool> show-settings;
 
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
@@ -82,7 +85,22 @@ export component AppWindow inherits Window {
     // Most recent captured log lines (oldest first).
     in property <[string]> detail-logs;
 
+    // App-level preflight state: "ready" | "cli-missing" | "relogin".
+    // Non-ready states show the PreflightBanner above the list. The "relogin"
+    // state also covers the expired CLI sign-in case.
+    in property <string> app-state: "ready";
+
+    // Settings: current "start with Windows" state (set from Rust at startup).
+    in-out property <bool> auto-start-enabled;
+
     callback refresh();
+    // Asks Rust to re-sync `auto-start-enabled` from the registry, then open the
+    // Settings dialog.
+    callback open-settings();
+    // The user toggled the auto-start checkbox in the settings dialog.
+    callback auto-start-changed(bool);
+    // The user clicked "Sign in" in the re-login banner.
+    callback sign-in();
     // Start / stop hosting a group (by Real Tunnel ID).
     callback host(string /*tunnel-id*/);
     callback stop(string /*tunnel-id*/);
@@ -121,6 +139,12 @@ export component AppWindow inherits Window {
                 Rectangle { horizontal-stretch: 1; }
                 Pill { text: root.status; }
                 TxtButton {
+                    text: Strings.btn-settings;
+                    clicked => {
+                        root.open-settings();
+                    }
+                }
+                TxtButton {
                     text: Strings.btn-new-group;
                     clicked => {
                         root.show-create-group = true;
@@ -142,6 +166,14 @@ export component AppWindow inherits Window {
             }
         }
         Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Preflight banner (CLI missing / re-login) ----
+        if root.app-state != "ready" : PreflightBanner {
+            app-state: root.app-state;
+            sign-in => {
+                root.sign-in();
+            }
+        }
 
         // ---- List ----
         ListView {
@@ -190,6 +222,9 @@ export component AppWindow inherits Window {
                                             ? Strings.badge-down
                                             : Strings.badge-provisioning));
                             }
+                            // "Hosted elsewhere": service reports active connections but this session is not hosting.
+                            if row.host-state == "external" :
+                            Pill { text: Strings.badge-hosted-external; }
                         }
                     }
 
@@ -329,6 +364,15 @@ export component AppWindow inherits Window {
         open <=> root.show-confirm;
         accept => {
             root.confirm-accept();
+        }
+    }
+    SettingsDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-settings;
+        auto-start <=> root.auto-start-enabled;
+        auto-start-changed(enabled) => {
+            root.auto-start-changed(enabled);
         }
     }
 }
