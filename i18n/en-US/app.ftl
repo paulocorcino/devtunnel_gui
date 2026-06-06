@@ -95,6 +95,19 @@ status-signing-in = signing in…
 toast-relogin-title = DevTunnel GUI — sign-in required
 toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
 
+## Port detail panel
+tab-metrics = Metrics
+tab-logs = Logs
+metric-upload = Upload
+metric-download = Download
+metric-total = Total
+metric-rate = Rate
+metric-connections = Connections
+metric-active = Active
+metric-na = n/a
+metric-rate-per-second = { $value }/s
+logs-empty = No log entries yet.
+
 ## Tray menu
 menu-open-window = Open window
 menu-copy-url = Copy URL
@@ -108,3 +121,4 @@ err-cli-failed = `devtunnel { $args }` returned error: { $stderr }
 err-cli-invalid-json = invalid JSON from `devtunnel { $args }`
 err-empty-group-name = group name must contain at least one letter or digit
 err-invalid-port = port number must be between 1 and 65535
+err-port-not-found = port { $port } not found in tunnel { $tunnel }

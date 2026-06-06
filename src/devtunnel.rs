@@ -343,6 +343,46 @@ fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
     }
 }
 
+/// Live metrics of a single port, mapped from the `status` block of `show -j`.
+/// Every field is optional: `None` renders as "n/a" in the UI.
+pub struct PortMetrics {
+    /// Current upload rate, bytes per second.
+    pub upload_rate: Option<f64>,
+    /// Current download rate, bytes per second.
+    pub download_rate: Option<f64>,
+    /// Total bytes uploaded since hosting started.
+    pub upload_total: Option<f64>,
+    /// Total bytes downloaded since hosting started.
+    pub download_total: Option<f64>,
+    /// Active client connections.
+    pub connection_count: Option<f64>,
+}
+
+/// Fetches the live metrics of one port via `show <id> -j`. Absent metrics map
+/// to `None`; a port missing from the tunnel is an error (it was deleted).
+pub fn fetch_port_status(tunnel_id: &str, port: i32, loc: &Locale) -> Result<PortMetrics> {
+    let show: ShowResult = run_json(&["show", tunnel_id, "-j"], loc)?;
+    let detail = show
+        .tunnel
+        .ports
+        .into_iter()
+        .find(|p| p.port_number == port)
+        .ok_or_else(|| {
+            let mut a = FluentArgs::new();
+            a.set("port", port as i64);
+            a.set("tunnel", tunnel_id.to_string());
+            anyhow!("{}", loc.t_args("err-port-not-found", &a))
+        })?;
+    let s = detail.status.unwrap_or_default();
+    Ok(PortMetrics {
+        upload_rate: s.current_upload_rate,
+        download_rate: s.current_download_rate,
+        upload_total: s.upload_total,
+        download_total: s.download_total,
+        connection_count: s.client_connection_count,
+    })
+}
+
 /// Enumerates tunnels (`list -j`) and, for each one, fetches ports + URLs (`show -j`).
 pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
     let list: TunnelList = run_json(&["list", "-j"], loc)?;
