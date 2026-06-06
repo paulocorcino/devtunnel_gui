@@ -27,11 +27,8 @@ Desktop.ini
 .scratch/
 .claude/
 
-# Ralph autonomous loop: per-worktree state and run logs (local evidence)
+# Ralph autonomous loop (now a global tool at ~\ralph): in-place run scratch + logs
 .ralph/
-scripts/ralph/runs/
-scripts/ralph/worktrees/
-scripts/ralph/state/
 
 # Staged-plan gate logs (local evidence, not versioned)
 docs/plans/logs/
