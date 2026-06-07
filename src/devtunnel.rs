@@ -249,6 +249,46 @@ pub fn create_port(tunnel_id: &str, opts: &CreatePortOpts, loc: &Locale) -> Resu
     run_ok(&argv, loc)
 }
 
+/// Builds the argv for re-applying a tunnel's expiration window:
+/// `update <id> --expiration <exp> -j`. Pure so the renewal contract is testable.
+pub fn update_expiration_args(tunnel_id: &str, expiration: &str) -> Vec<String> {
+    vec![
+        "update".into(),
+        tunnel_id.into(),
+        "--expiration".into(),
+        expiration.into(),
+        "-j".into(),
+    ]
+}
+
+/// Builds the argv for re-creating the anonymous-access ACE:
+/// `access create <id> --anonymous -j`. Pure so the renewal contract is testable.
+pub fn anonymous_ace_args(tunnel_id: &str) -> Vec<String> {
+    vec![
+        "access".into(),
+        "create".into(),
+        tunnel_id.into(),
+        "--anonymous".into(),
+        "-j".into(),
+    ]
+}
+
+/// Renews a tunnel (issue #6): re-applies the expiration window (skipped when
+/// `expiration` is empty) and re-creates the anonymous ACE. Both calls are
+/// idempotent one-shot subprocess invocations, independent of any in-process
+/// SDK hosting session.
+pub fn renew_tunnel(tunnel_id: &str, expiration: &str, loc: &Locale) -> Result<()> {
+    let expiration = expiration.trim();
+    if !expiration.is_empty() {
+        let args = update_expiration_args(tunnel_id, expiration);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_ok(&argv, loc)?;
+    }
+    let args = anonymous_ace_args(tunnel_id);
+    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_ok(&argv, loc)
+}
+
 /// Deletes an entire group (tunnel) and all of its ports.
 pub fn delete_group(tunnel_id: &str, loc: &Locale) -> Result<()> {
     run_ok(&["delete", tunnel_id, "-f", "-j"], loc)
@@ -441,7 +481,26 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_user_show, is_auth_error, sanitize_tunnel_id};
+    use super::{
+        anonymous_ace_args, classify_user_show, is_auth_error, sanitize_tunnel_id,
+        update_expiration_args,
+    };
+
+    #[test]
+    fn update_expiration_args_builds_exact_argv() {
+        assert_eq!(
+            update_expiration_args("frontend.brs", "30d"),
+            vec!["update", "frontend.brs", "--expiration", "30d", "-j"]
+        );
+    }
+
+    #[test]
+    fn anonymous_ace_args_builds_exact_argv() {
+        assert_eq!(
+            anonymous_ace_args("frontend.brs"),
+            vec!["access", "create", "frontend.brs", "--anonymous", "-j"]
+        );
+    }
 
     #[test]
     fn auth_errors_are_classified_true() {
