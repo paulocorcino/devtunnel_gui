@@ -323,8 +323,14 @@ fn main() -> anyhow::Result<()> {
     {
         let app_state = app_state.clone();
         app.on_default_expiration_changed(move |exp| {
+            let exp = exp.trim().to_string();
+            // Ignore a transiently empty field (the user clearing it to retype):
+            // persisting "" would disable renewal and the new-group prefill.
+            if exp.is_empty() {
+                return;
+            }
             let mut st = app_state.borrow_mut();
-            st.settings.default_expiration = exp.trim().to_string();
+            st.settings.default_expiration = exp;
             st.save();
         });
     }

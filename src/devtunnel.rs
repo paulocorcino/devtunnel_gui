@@ -273,10 +273,32 @@ pub fn anonymous_ace_args(tunnel_id: &str) -> Vec<String> {
     ]
 }
 
+/// Pure classifier for `access list -j` output: does the tunnel currently
+/// grant anonymous access (an `Anonymous` entry that is not a deny rule)?
+pub fn classify_anonymous_access(v: &serde_json::Value) -> bool {
+    v.get("accessControlEntries")
+        .and_then(|e| e.as_array())
+        .is_some_and(|entries| {
+            entries.iter().any(|e| {
+                e.get("type").and_then(|t| t.as_str()) == Some("Anonymous")
+                    && !e.get("isDeny").and_then(|d| d.as_bool()).unwrap_or(false)
+            })
+        })
+}
+
+/// True when the tunnel currently grants anonymous access, via
+/// `access list <id> -j`. Renewal uses this so it only refreshes the ACE on
+/// groups the user actually made anonymous — never widening access.
+pub fn has_anonymous_access(tunnel_id: &str, loc: &Locale) -> Result<bool> {
+    let v: serde_json::Value = run_json(&["access", "list", tunnel_id, "-j"], loc)?;
+    Ok(classify_anonymous_access(&v))
+}
+
 /// Renews a tunnel (issue #6): re-applies the expiration window (skipped when
-/// `expiration` is empty) and re-creates the anonymous ACE. Both calls are
-/// idempotent one-shot subprocess invocations, independent of any in-process
-/// SDK hosting session.
+/// `expiration` is empty) and refreshes the anonymous ACE — but only when the
+/// tunnel already grants anonymous access, so renewal never turns an
+/// authenticated group public. All calls are idempotent one-shot subprocess
+/// invocations, independent of any in-process SDK hosting session.
 pub fn renew_tunnel(tunnel_id: &str, expiration: &str, loc: &Locale) -> Result<()> {
     let expiration = expiration.trim();
     if !expiration.is_empty() {
@@ -284,9 +306,12 @@ pub fn renew_tunnel(tunnel_id: &str, expiration: &str, loc: &Locale) -> Result<(
         let argv: Vec<&str> = args.iter().map(String::as_str).collect();
         run_ok(&argv, loc)?;
     }
-    let args = anonymous_ace_args(tunnel_id);
-    let argv: Vec<&str> = args.iter().map(String::as_str).collect();
-    run_ok(&argv, loc)
+    if has_anonymous_access(tunnel_id, loc)? {
+        let args = anonymous_ace_args(tunnel_id);
+        let argv: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_ok(&argv, loc)?;
+    }
+    Ok(())
 }
 
 /// Deletes an entire group (tunnel) and all of its ports.
@@ -482,9 +507,38 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        anonymous_ace_args, classify_user_show, is_auth_error, sanitize_tunnel_id,
-        update_expiration_args,
+        anonymous_ace_args, classify_anonymous_access, classify_user_show, is_auth_error,
+        sanitize_tunnel_id, update_expiration_args,
     };
+
+    #[test]
+    fn anonymous_access_detected_on_allow_entry() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"accessControlEntries":[{"type":"Anonymous","subjects":[],"scopes":["connect"]}]}"#,
+        )
+        .unwrap();
+        assert!(classify_anonymous_access(&v));
+    }
+
+    #[test]
+    fn anonymous_access_false_on_deny_empty_or_other_entries() {
+        let deny: serde_json::Value = serde_json::from_str(
+            r#"{"accessControlEntries":[{"type":"Anonymous","isDeny":true}]}"#,
+        )
+        .unwrap();
+        assert!(!classify_anonymous_access(&deny));
+
+        let empty: serde_json::Value =
+            serde_json::from_str(r#"{"accessControlEntries":[]}"#).unwrap();
+        assert!(!classify_anonymous_access(&empty));
+
+        let other: serde_json::Value =
+            serde_json::from_str(r#"{"accessControlEntries":[{"type":"Tenant"}]}"#).unwrap();
+        assert!(!classify_anonymous_access(&other));
+
+        let missing: serde_json::Value = serde_json::from_str(r#"{}"#).unwrap();
+        assert!(!classify_anonymous_access(&missing));
+    }
 
     #[test]
     fn update_expiration_args_builds_exact_argv() {
