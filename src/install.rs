@@ -11,7 +11,11 @@
 #![cfg(windows)]
 
 use anyhow::{Context, Result};
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+
+/// Process creation flag: run the detached deleter with no console window.
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Sub-folder name under `%LOCALAPPDATA%\Programs` and the Start-menu link label.
 const APP_DIR_NAME: &str = "DevTunnelGUI";
@@ -108,6 +112,48 @@ pub fn relaunch_from(new_exe: &Path, old_exe: &Path) -> Result<()> {
         .arg(old_exe)
         .spawn()
         .with_context(|| format!("relaunching {}", new_exe.display()))?;
+    Ok(())
+}
+
+/// Deletes the Start-menu shortcut if it exists. A missing shortcut counts as
+/// success (nothing to remove). Used by the in-app uninstall flow.
+pub fn remove_shortcut() -> Result<()> {
+    let Some(link) = shortcut_path() else {
+        return Ok(());
+    };
+    match std::fs::remove_file(&link) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing shortcut {}", link.display())),
+    }
+}
+
+/// Schedules deletion of the installed app after this process exits.
+///
+/// A running executable cannot delete itself, so we spawn a **detached** `cmd`
+/// that waits a couple of seconds for our process to release the file lock, then
+/// removes the whole per-user install directory (or just the executable when
+/// running portable). The deleter's working directory is set to the temp folder
+/// because the app, launched from its Start-menu shortcut, has its CWD inside
+/// the install directory — which would otherwise block `rmdir`. Best-effort by
+/// nature: a file left behind is harmless. The caller exits right after.
+pub fn spawn_self_delete() -> Result<()> {
+    let exe = std::env::current_exe().context("locating current executable")?;
+    // When installed, wipe the whole install dir; otherwise just the executable.
+    let (verb, target) = match (is_installed(), programs_dir()) {
+        (true, Some(dir)) => ("rmdir /S /Q", dir),
+        _ => ("del /F /Q", exe),
+    };
+    let target = target.to_string_lossy().to_string();
+    // `ping -n 4` waits ~3 s without needing a console (unlike `timeout`),
+    // giving this process time to exit and release the lock before the delete.
+    let script = format!("ping 127.0.0.1 -n 4 > nul & {verb} \"{target}\"");
+    std::process::Command::new("cmd")
+        .args(["/C", &script])
+        .current_dir(std::env::temp_dir())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .with_context(|| format!("scheduling self-delete of {target}"))?;
     Ok(())
 }
 

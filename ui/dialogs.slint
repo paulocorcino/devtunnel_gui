@@ -303,6 +303,11 @@ export component AddPortDialog inherits Rectangle {
 // `Strings.confirm-message`. On accept the dialog calls `accept()`.
 export component ConfirmDialog inherits Rectangle {
     in-out property <bool> open;
+    // Message + accept-button label. Default to the delete-confirmation strings
+    // so the existing delete flow needs no changes; the uninstall flow overrides
+    // both for its own copy.
+    in property <string> message: Strings.confirm-message;
+    in property <string> accept-text: Strings.btn-delete;
     callback accept();
     callback cancel();
 
@@ -323,7 +328,7 @@ export component ConfirmDialog inherits Rectangle {
         }
 
         Text {
-            text: Strings.confirm-message;
+            text: root.message;
             color: Theme.text;
             font-size: Theme.fs-body;
             wrap: word-wrap;
@@ -340,7 +345,7 @@ export component ConfirmDialog inherits Rectangle {
                 }
             }
             TxtButton {
-                text: Strings.btn-delete;
+                text: root.accept-text;
                 danger: true;
                 clicked => {
                     root.do-accept();

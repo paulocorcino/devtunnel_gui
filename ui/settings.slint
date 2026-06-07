@@ -59,6 +59,9 @@ export component SettingsDialog inherits Rectangle {
     // Requirements actions.
     callback install-cli();
     callback sign-in();
+    // The user clicked "Uninstall" (only shown when the app is installed). The
+    // AppWindow opens a confirmation dialog before anything is removed.
+    callback uninstall();
     // Open an external URL in the browser (forwarded to AppWindow.open-url).
     callback open-url(string);
     // Current "start with Windows" state; set from Rust before opening and
@@ -244,9 +247,23 @@ export component SettingsDialog inherits Rectangle {
             }
         }
 
+        // ---- Danger zone: uninstall (only meaningful once installed) ----
+        if root.req-installed-ok: Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+
         HorizontalLayout {
             spacing: Theme.gap;
             alignment: end;
+            if root.req-installed-ok: TxtButton {
+                text: Strings.btn-uninstall;
+                danger: true;
+                clicked => {
+                    root.uninstall();
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
             TxtButton {
                 text: Strings.btn-close;
                 primary: true;

@@ -32,6 +32,8 @@ export component AppWindow inherits Window {
     in-out property <bool> show-add-port;
     in-out property <bool> show-confirm;
     in-out property <bool> show-settings;
+    // Uninstall confirmation overlay (opened from Settings → Uninstall).
+    in-out property <bool> show-uninstall-confirm;
 
     // True only in the `hosting` build; gates the per-group Host/Stop toggle.
     in property <bool> hosting-enabled: false;
@@ -88,6 +90,8 @@ export component AppWindow inherits Window {
     callback theme-changed(bool /*dark*/);
     // The user clicked "Sign in" in the re-login banner.
     callback sign-in();
+    // The user confirmed the uninstall: remove shortcut + auto-start, then self-delete.
+    callback uninstall-confirmed();
     // Start / stop hosting a group (by Real Tunnel ID).
     callback host(string /*tunnel-id*/);
     callback stop(string /*tunnel-id*/);
@@ -325,6 +329,21 @@ export component AppWindow inherits Window {
         }
         open-url(url) => {
             root.open-url(url);
+        }
+        // Close Settings and raise the uninstall confirmation overlay.
+        uninstall => {
+            root.show-settings = false;
+            root.show-uninstall-confirm = true;
+        }
+    }
+    ConfirmDialog {
+        width: 100%;
+        height: 100%;
+        open <=> root.show-uninstall-confirm;
+        message: Strings.confirm-uninstall;
+        accept-text: Strings.btn-uninstall;
+        accept => {
+            root.uninstall-confirmed();
         }
     }
 }

@@ -431,6 +431,10 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // ---- Settings: uninstall (remove shortcut + auto-start, then self-delete) ----
+    // The UI shows a confirmation dialog before invoking this (uninstall-confirmed).
+    #[cfg(windows)]
+    app.on_uninstall_confirmed(perform_uninstall);
 
     // ---- UI callbacks ----
     app.on_copy_url(|url| copy(&url));
@@ -1116,6 +1120,33 @@ fn enable_auto_start(app_state: &Rc<RefCell<state::AppState>>) {
     }
 }
 
+/// Uninstalls the app: removes the Start-menu shortcut, disables start-with-
+/// Windows, deletes the persisted app state, schedules deletion of the installed
+/// executable (a running exe cannot delete itself — a detached `cmd` does it once
+/// we exit), then quits the event loop so the file lock is released. Every step
+/// is best-effort: a failure is logged but never blocks the rest of the teardown.
+#[cfg(windows)]
+fn perform_uninstall() {
+    if let Err(e) = autostart::disable() {
+        log::warn!("uninstall: failed to remove Run entry: {e}");
+    }
+    if let Err(e) = install::remove_shortcut() {
+        log::warn!("uninstall: failed to remove shortcut: {e}");
+    }
+    // Remove persisted settings + row cache (%APPDATA%\devtunnel-gui).
+    let dir = state::state_dir();
+    if let Err(e) = std::fs::remove_dir_all(&dir) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            log::warn!("uninstall: failed to remove state dir {}: {e}", dir.display());
+        }
+    }
+    if let Err(e) = install::spawn_self_delete() {
+        log::warn!("uninstall: failed to schedule self-delete: {e}");
+    }
+    // Exit so the executable's file lock is released and the detached deleter runs.
+    let _ = slint::quit_event_loop();
+}
+
 /// True when Windows is set to dark app mode (`AppsUseLightTheme == 0`).
 /// Defaults to light when the value is missing or unreadable.
 #[cfg(windows)]
@@ -1700,6 +1731,8 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_probe_interval(loc.t("field-probe-interval").into());
     s.set_field_default_expiration(loc.t("field-default-expiration").into());
     s.set_btn_close(loc.t("btn-close").into());
+    s.set_btn_uninstall(loc.t("btn-uninstall").into());
+    s.set_confirm_uninstall(loc.t("confirm-uninstall").into());
 
     // About
     s.set_about_title(loc.t("about-title").into());

@@ -95,6 +95,10 @@ field-probe-interval = Probe interval (seconds)
 field-default-expiration = Default expiration
 btn-close = Close
 
+## Settings — uninstall
+btn-uninstall = Uninstall
+confirm-uninstall = Uninstall DevTunnel GUI? This removes the Start-menu shortcut, turns off start-with-Windows, deletes your saved settings, and removes the app from your programs folder.
+
 ## About
 about-title = About
 about-version-label = Version
