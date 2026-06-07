@@ -5,6 +5,7 @@
 mod autostart;
 mod devtunnel;
 mod host;
+mod icon_render;
 mod locale;
 mod logbuf;
 mod model;
@@ -181,11 +182,14 @@ fn main() -> anyhow::Result<()> {
     // tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=trace`).
     let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=debug,tunnels=info").install();
 
-    let app = AppWindow::new()?;
+    // winit registers the window class with a null icon, so the title bar and
+    // taskbar would show the generic default. Install the winit backend with a
+    // hook that sets our brand icon on every window at creation time. (The
+    // embedded executable resource icon only covers the file in Explorer; Slint's
+    // own `Window.icon` property is not wired to winit.)
+    install_window_icon();
 
-    // Dark mode is first-class: start from the Windows app theme; the ⚙
-    // affordance in the top bar toggles it at runtime.
-    app.global::<Theme>().set_dark(system_prefers_dark());
+    let app = AppWindow::new()?;
 
     let loc = Rc::new(Locale::load(&locale::system_locale()));
     apply_strings(&app, &loc);
@@ -304,7 +308,27 @@ fn main() -> anyhow::Result<()> {
     {
         let st = app_state.borrow();
         app.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
-        app.set_default_expiration(st.settings.default_expiration.clone().into());
+        app.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
+    }
+
+    // ---- Dark mode (persisted; falls back to the Windows app theme) ----
+    // The top-bar toggle flips Theme.dark and fires theme-changed; we persist
+    // the explicit choice so it survives restarts (issue: gear → sun/moon).
+    {
+        let dark = app_state
+            .borrow()
+            .settings
+            .dark
+            .unwrap_or_else(system_prefers_dark);
+        app.global::<Theme>().set_dark(dark);
+    }
+    {
+        let app_state = app_state.clone();
+        app.on_theme_changed(move |dark| {
+            let mut st = app_state.borrow_mut();
+            st.settings.dark = Some(dark);
+            st.save();
+        });
     }
     {
         let app_state = app_state.clone();
@@ -322,15 +346,11 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let app_state = app_state.clone();
-        app.on_default_expiration_changed(move |exp| {
-            let exp = exp.trim().to_string();
-            // Ignore a transiently empty field (the user clearing it to retype):
-            // persisting "" would disable renewal and the new-group prefill.
-            if exp.is_empty() {
-                return;
-            }
+        app.on_default_expiration_changed(move |days| {
             let mut st = app_state.borrow_mut();
-            st.settings.default_expiration = exp;
+            // The UI is days-only and pre-clamped; format the canonical CLI
+            // string ("Nd") that renewal and new-group creation consume.
+            st.settings.default_expiration = expiration_string(days);
             st.save();
         });
     }
@@ -347,7 +367,7 @@ fn main() -> anyhow::Result<()> {
                 // dialog always opens showing the current values.
                 let st = app_state.borrow();
                 a.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
-                a.set_default_expiration(st.settings.default_expiration.clone().into());
+                a.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
                 a.set_show_settings(true);
             }
         });
@@ -407,10 +427,10 @@ fn main() -> anyhow::Result<()> {
         let tray = tray.clone();
         let actions = actions.clone();
         app.on_create_group(
-            move |name, expiration, anonymous, description, keep_headers, request_timeout| {
+            move |name, expiration_days, anonymous, description, keep_headers, request_timeout| {
                 let opts = devtunnel::CreateGroupOpts {
                     name: name.to_string(),
-                    expiration: expiration.to_string(),
+                    expiration: expiration_string(expiration_days),
                     anonymous,
                     description: description.to_string(),
                     keep_headers,
@@ -966,6 +986,9 @@ fn main() -> anyhow::Result<()> {
     // Use the "until quit" variant so the app stays alive when the (only) window
     // is hidden to the tray — otherwise Slint's quit-on-last-window-closed would
     // terminate the whole process the moment the window is closed/hidden.
+    if std::env::var_os("DEVTUNNEL_SHOW_ON_START").is_some() {
+        let _ = app.show();
+    }
     slint::run_event_loop_until_quit()?;
     Ok(())
 }
@@ -986,6 +1009,27 @@ fn system_prefers_dark() -> bool {
 #[cfg(not(windows))]
 fn system_prefers_dark() -> bool {
     false
+}
+
+/// Maximum tunnel lifetime the Dev Tunnels service accepts.
+const MAX_EXPIRATION_DAYS: i32 = 30;
+
+/// Parses a stored expiration string (e.g. `"30d"`) into whole days for the
+/// days-only UI, clamped to `[1, MAX_EXPIRATION_DAYS]`. Non-day strings (a
+/// legacy `"12h"`, or empty) fall back to the maximum.
+fn expiration_days(s: &str) -> i32 {
+    s.trim()
+        .trim_end_matches(['d', 'D'])
+        .trim()
+        .parse::<i32>()
+        .unwrap_or(MAX_EXPIRATION_DAYS)
+        .clamp(1, MAX_EXPIRATION_DAYS)
+}
+
+/// Formats a day count as the canonical CLI expiration string (`"Nd"`),
+/// clamping to the service limit so an out-of-range value can never be sent.
+fn expiration_string(days: i32) -> String {
+    format!("{}d", days.clamp(1, MAX_EXPIRATION_DAYS))
 }
 
 fn show_window(weak: &slint::Weak<AppWindow>) {
@@ -1466,6 +1510,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_dlg_keep_headers(loc.t("dlg-keep-headers").into());
     s.set_dlg_request_timeout(loc.t("dlg-request-timeout").into());
     s.set_ph_request_timeout(loc.t("ph-request-timeout").into());
+    s.set_unit_days(loc.t("unit-days").into());
 
     // Dialog — new group
     s.set_dlg_new_group_title(loc.t("dlg-new-group-title").into());
@@ -1539,6 +1584,27 @@ mod tests {
 
         st.remove_placeholder(id2);
         assert!(st.placeholders.is_empty());
+    }
+
+    #[test]
+    fn expiration_days_parses_and_clamps() {
+        assert_eq!(expiration_days("30d"), 30);
+        assert_eq!(expiration_days("7d"), 7);
+        assert_eq!(expiration_days("  14d "), 14);
+        // Over the service limit clamps down; zero/negative clamp up to 1.
+        assert_eq!(expiration_days("99d"), 30);
+        assert_eq!(expiration_days("0d"), 1);
+        // Legacy hour strings and empty/garbage fall back to the maximum.
+        assert_eq!(expiration_days("12h"), MAX_EXPIRATION_DAYS);
+        assert_eq!(expiration_days(""), MAX_EXPIRATION_DAYS);
+    }
+
+    #[test]
+    fn expiration_string_formats_and_clamps() {
+        assert_eq!(expiration_string(30), "30d");
+        assert_eq!(expiration_string(1), "1d");
+        assert_eq!(expiration_string(99), "30d");
+        assert_eq!(expiration_string(0), "1d");
     }
 
     #[test]
@@ -1708,25 +1774,39 @@ mod tests {
     }
 }
 
-/// Solid blue 32×32 icon (no asset file).
+/// Selects the winit backend with a window-attributes hook that sets the brand
+/// icon on every window at creation time (so the title bar and taskbar show it,
+/// not winit's generic default). Best-effort: logs and continues on failure.
+fn install_window_icon() {
+    const SIZE: u32 = 256;
+    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Normal);
+    let icon = match slint::winit_030::winit::window::Icon::from_rgba(rgba, SIZE, SIZE) {
+        Ok(icon) => icon,
+        Err(e) => {
+            log::warn!("window icon: failed to build ({e})");
+            return;
+        }
+    };
+    if let Err(e) = slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(move |attrs| attrs.with_window_icon(Some(icon.clone())))
+        .select()
+    {
+        log::warn!("window icon: winit backend selection failed ({e})");
+    }
+}
+
+/// The brand tunnel-portal tray icon (procedurally rendered — see `icon_render`).
 fn build_icon() -> Icon {
     const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for _ in 0..(SIZE * SIZE) {
-        rgba.extend_from_slice(&[0x1e, 0x90, 0xff, 0xff]); // dodger blue
-    }
-    // String literal kept here intentionally: build_icon() runs before Locale is loaded.
+    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Normal);
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
 }
 
-/// Solid amber 32×32 warning icon shown while the app is not "ready"
+/// Amber warning variant shown on the tray while the app is not "ready"
 /// (CLI missing / re-login required).
 fn build_warning_icon() -> Icon {
     const SIZE: u32 = 32;
-    let mut rgba = Vec::with_capacity((SIZE * SIZE * 4) as usize);
-    for _ in 0..(SIZE * SIZE) {
-        rgba.extend_from_slice(&[0xf5, 0x9e, 0x0b, 0xff]); // amber
-    }
+    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Warning);
     Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
 }
 

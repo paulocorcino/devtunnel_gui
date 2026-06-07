@@ -1,10 +1,12 @@
-// Settings dialog (issue #5): a minimal modal surface for app-level options.
-// Follows the same backdrop-plus-card pattern as the dialogs in dialogs.slint;
-// visibility is driven by the `open` property bound from AppWindow.
-import { CheckBox, LineEdit } from "std-widgets.slint";
+// Settings dialog (issue #5): app-level options on the shared modal chrome.
+// Uses the same DialogShell + themed Field/Check controls as the create/add
+// dialogs so it matches the rest of the app (the old std-widgets LineEdit and
+// CheckBox ignored the theme and rendered as oversized light boxes).
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
+import { Field, DaysField, Check } from "field.slint";
+import { DialogShell } from "dialogs.slint";
 
 export component SettingsDialog inherits Rectangle {
     in-out property <bool> open;
@@ -16,110 +18,76 @@ export component SettingsDialog inherits Rectangle {
     // opening, re-applied to the live probe on change (issue #6).
     in-out property <int> probe-interval;
     callback probe-interval-changed(int);
-    // Default expiration for new groups and the renewal target (issue #6).
-    in-out property <string> default-expiration;
-    callback default-expiration-changed(string);
+    // Default expiration for new groups and the renewal target, in days (issue #6).
+    in-out property <int> default-expiration-days;
+    callback default-expiration-changed(int /*days*/);
 
     // Re-seed the editors from the Rust-set properties every time the dialog
     // opens (a manual edit severs a plain binding, so reset explicitly).
     changed open => {
         if (root.open) {
-            probe-edit.text = root.probe-interval;
-            exp-edit.text = root.default-expiration;
+            probe-f.text = root.probe-interval;
+            exp-f.text = root.default-expiration-days;
         }
     }
 
-    visible: root.open;
-    background: #00000099;
+    function commit-probe() {
+        if (probe-f.text.is-float()) {
+            root.probe-interval = probe-f.text.to-float();
+            root.probe-interval-changed(root.probe-interval);
+        }
+    }
+    function commit-expiration() {
+        root.default-expiration-days = exp-f.days;
+        root.default-expiration-changed(exp-f.days);
+    }
 
-    // Absorb clicks on the backdrop.
-    TouchArea { }
+    DialogShell {
+        width: 100%;
+        height: 100%;
+        open <=> root.open;
+        title: Strings.settings-title;
+        confirm => {
+            root.open = false;
+        }
 
-    Rectangle {
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        width: 360px;
-        background: Theme.surface-2;
-        border-color: Theme.border;
-        border-width: 1px;
-        border-radius: Theme.radius;
-
-        // Keep clicks inside the card from reaching the backdrop.
-        TouchArea { }
-
-        VerticalLayout {
-            padding: 18px;
-            spacing: 16px;
-
-            Text {
-                text: Strings.settings-title;
-                color: Theme.text;
-                font-size: Theme.fs-section;
-                font-weight: 700;
+        Check {
+            text: Strings.field-auto-start;
+            checked <=> root.auto-start;
+            toggled(on) => {
+                root.auto-start-changed(on);
             }
+        }
 
-            CheckBox {
-                text: Strings.field-auto-start;
-                checked: root.auto-start;
-                toggled => {
-                    root.auto-start = self.checked;
-                    root.auto-start-changed(self.checked);
-                }
+        probe-f := Field {
+            label: Strings.field-probe-interval;
+            number-only: true;
+            edited => {
+                root.commit-probe();
             }
-
-            VerticalLayout {
-                spacing: Theme.gap-sm;
-                Text {
-                    text: Strings.field-probe-interval;
-                    color: Theme.text;
-                    font-size: Theme.fs-body;
-                }
-                probe-edit := LineEdit {
-                    input-type: number;
-                    edited => {
-                        if (self.text.is-float()) {
-                            root.probe-interval = self.text.to-float();
-                            root.probe-interval-changed(root.probe-interval);
-                        }
-                    }
-                    accepted => {
-                        if (self.text.is-float()) {
-                            root.probe-interval = self.text.to-float();
-                            root.probe-interval-changed(root.probe-interval);
-                        }
-                    }
-                }
+            accepted => {
+                root.commit-probe();
             }
+        }
 
-            VerticalLayout {
-                spacing: Theme.gap-sm;
-                Text {
-                    text: Strings.field-default-expiration;
-                    color: Theme.text;
-                    font-size: Theme.fs-body;
-                }
-                exp-edit := LineEdit {
-                    placeholder-text: Strings.ph-expiration;
-                    edited => {
-                        root.default-expiration = self.text;
-                        root.default-expiration-changed(self.text);
-                    }
-                    accepted => {
-                        root.default-expiration = self.text;
-                        root.default-expiration-changed(self.text);
-                    }
-                }
+        exp-f := DaysField {
+            label: Strings.field-default-expiration;
+            edited => {
+                root.commit-expiration();
             }
+            accepted => {
+                root.commit-expiration();
+            }
+        }
 
-            HorizontalLayout {
-                spacing: 8px;
-                alignment: end;
-                TxtButton {
-                    text: Strings.btn-close;
-                    primary: true;
-                    clicked => {
-                        root.open = false;
-                    }
+        HorizontalLayout {
+            spacing: Theme.gap;
+            alignment: end;
+            TxtButton {
+                text: Strings.btn-close;
+                primary: true;
+                clicked => {
+                    root.open = false;
                 }
             }
         }

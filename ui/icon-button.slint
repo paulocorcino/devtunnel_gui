@@ -11,7 +11,18 @@ export component IconButton inherits Rectangle {
     in property <bool> always-visible: false;
     in property <bool> enabled: true;
     in property <bool> danger: false;
+    // Show the tooltip to the left of the button (vertically centered) instead
+    // of above it. Set for buttons near the top edge (top bar, card header):
+    // an above-tooltip is clipped by the window/list viewport, and a below one
+    // is painted over by the content rendered after it. A left tip stays inside
+    // its own (last-painted) container, so it is neither clipped nor occluded.
+    in property <bool> tip-left: false;
     callback clicked();
+
+    // True while the pointer is over this button. Parents OR this into their
+    // reveal state so moving onto the button does not "un-hover" the row and
+    // make it flicker (a child TouchArea steals hover from its parent).
+    out property <bool> hovered: ta.has-hover && root.enabled;
 
     property <bool> shown: root.revealed || root.always-visible;
 
@@ -24,6 +35,7 @@ export component IconButton inherits Rectangle {
 
     Text {
         text: root.glyph;
+        font-family: Theme.icon-font;
         color: root.danger
             ? Theme.down
             : (ta.has-hover && root.enabled ? Theme.text : Theme.muted);
@@ -34,16 +46,23 @@ export component IconButton inherits Rectangle {
         height: 100%;
     }
 
+    // The touch area stays enabled even while the button is faded out, so the
+    // pointer entering it keeps `hovered` true. Hit-testing a 0-opacity button is
+    // harmless: the parent only fades it in when the row or this button is hovered.
     ta := TouchArea {
-        enabled: root.enabled && root.shown;
+        enabled: root.enabled;
         clicked => {
             root.clicked();
         }
     }
 
     TooltipBubble {
-        x: (parent.width - self.width) / 2;
-        y: -self.height - Theme.gap-sm;
+        x: root.tip-left
+            ? -self.width - Theme.gap-sm
+            : (parent.width - self.width) / 2;
+        y: root.tip-left
+            ? (parent.height - self.height) / 2
+            : -self.height - Theme.gap-sm;
         tip: root.tip;
         shown: ta.has-hover && root.enabled;
     }

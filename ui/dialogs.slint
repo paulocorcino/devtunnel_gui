@@ -5,7 +5,7 @@
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
-import { Field, Select, Check, Collapsible } from "field.slint";
+import { Field, DaysField, Select, Check, Collapsible } from "field.slint";
 
 // One group entry for the "Add port" group picker. Kept here so both the
 // dialog and the AppWindow share the type.
@@ -15,7 +15,7 @@ export struct GroupItem {
 }
 
 // Shared modal chrome: dimmed backdrop + centered card + keyboard handling.
-component DialogShell inherits Rectangle {
+export component DialogShell inherits Rectangle {
     in property <string> title;
     in-out property <bool> open;
     // Enter anywhere in the dialog.
@@ -84,9 +84,9 @@ component DialogShell inherits Rectangle {
 // ---- New group ----
 export component CreateGroupDialog inherits Rectangle {
     in-out property <bool> open;
-    // Pre-filled expiration (issue #6): follows Settings.default_expiration.
-    in property <string> default-expiration: "30d";
-    callback submit(string /*name*/, string /*expiration*/, bool /*anonymous*/,
+    // Pre-filled expiration in days (issue #6): follows Settings.default_expiration.
+    in property <int> default-expiration-days: 30;
+    callback submit(string /*name*/, int /*expiration-days*/, bool /*anonymous*/,
                     string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
     callback cancel();
 
@@ -94,7 +94,7 @@ export component CreateGroupDialog inherits Rectangle {
     changed open => {
         if (root.open) {
             name-f.text = "";
-            exp-f.text = root.default-expiration;
+            exp-f.text = root.default-expiration-days;
             anon-c.checked = true;
             desc-f.text = "";
             kh-c.checked = false;
@@ -104,7 +104,7 @@ export component CreateGroupDialog inherits Rectangle {
     }
 
     function do-submit() {
-        root.submit(name-f.text, exp-f.text, anon-c.checked,
+        root.submit(name-f.text, exp-f.days, anon-c.checked,
                     desc-f.text, kh-c.checked, to-f.text);
         root.open = false;
     }
@@ -128,10 +128,9 @@ export component CreateGroupDialog inherits Rectangle {
                 root.do-submit();
             }
         }
-        exp-f := Field {
+        exp-f := DaysField {
             label: Strings.field-expiration;
-            placeholder: Strings.ph-expiration;
-            text: root.default-expiration;
+            text: root.default-expiration-days;
             accepted => {
                 root.do-submit();
             }

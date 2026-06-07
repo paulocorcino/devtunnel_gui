@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow a manual run from the Actions tab for dry-runs / re-packaging.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build a release for (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  # Needed for softprops/action-gh-release to create the GitHub Release.
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+
+      - name: Verify OpenSSL build prerequisites
+        shell: pwsh
+        run: |
+          nasm -v
+          perl -v
+
+      # Release build with the headline in-process hosting feature. The runner
+      # image provides NASM + Strawberry Perl + MSVC for the vendored OpenSSL.
+      - name: Build release (--features hosting)
+        run: cargo build --release --locked --features hosting --bin devtunnel_gui
+
+      - name: Package artifacts
+        id: package
+        shell: pwsh
+        run: |
+          $tag = '${{ github.event.inputs.tag || github.ref_name }}'
+          $version = $tag.TrimStart('v')
+          $name = "devtunnel_gui-$version-windows-x64.exe"
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item target/release/devtunnel_gui.exe "dist/$name"
+
+          # SHA256 sidecar in the standard "<hash>  <filename>" format so it can
+          # be verified with `sha256sum -c` / `Get-FileHash`.
+          $hash = (Get-FileHash "dist/$name" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name" | Out-File -Encoding ascii "dist/$name.sha256"
+
+          Write-Host "Packaged $name ($hash)"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.exe
+            dist/*.sha256

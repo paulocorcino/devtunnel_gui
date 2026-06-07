@@ -28,6 +28,7 @@ dlg-advanced = Advanced
 dlg-keep-headers = Keep original Host/Origin headers
 dlg-request-timeout = Request timeout (seconds)
 ph-request-timeout = 0 = disabled
+unit-days = days
 
 ## Dialog — new group
 dlg-new-group-title = New group

@@ -1,0 +1,74 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail the build on any warning so lint regressions can't merge.
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Fast, light job: the default GUI build needs nothing beyond the MSVC
+  # toolchain, so format/lint/build/test run quickly here.
+  check:
+    name: fmt + clippy + test (default)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets --locked
+
+      - name: Test
+        run: cargo test --locked
+
+  # Heavier job kept separate so it runs in parallel: the `hosting` feature
+  # pulls the `tunnels` SDK + vendored OpenSSL. The windows-latest runner image
+  # already ships NASM, Strawberry Perl and MSVC, so no extra setup is needed.
+  hosting-build:
+    name: build + clippy (--features hosting)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Distinct key so this heavy build doesn't evict the light job's cache.
+          key: hosting
+
+      # Surface the toolchain the OpenSSL vendored build depends on. If a future
+      # runner image drops these, this step makes the failure obvious.
+      - name: Verify OpenSSL build prerequisites
+        shell: pwsh
+        run: |
+          nasm -v
+          perl -v
+
+      - name: Clippy (hosting)
+        run: cargo clippy --features hosting --all-targets --locked

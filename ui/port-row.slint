@@ -39,6 +39,12 @@ export component PortRow inherits Rectangle {
     // metrics/logs detail panel.
     property <bool> expandable: pv.row-index >= 0 && pv.status != "provisioning";
 
+    // Reveal the row actions while the row OR any action button is hovered.
+    // Including the buttons' own hover prevents the flicker that a bare
+    // `hover.has-hover` produces when the pointer moves onto an action.
+    property <bool> show-actions: hover.has-hover || copy-btn.hovered
+        || open-btn.hovered || del-btn.hovered || root.always-show-actions;
+
     height: Theme.row-height;
     background: root.selected
         ? Theme.surface-2
@@ -105,31 +111,28 @@ export component PortRow inherits Rectangle {
             alignment: center;
             HorizontalLayout {
                 spacing: Theme.gap-sm;
-                IconButton {
-                    glyph: "⧉";
+                copy-btn := IconButton {
+                    glyph: Theme.ico-copy;
                     tip: Strings.tooltip-copy;
-                    revealed: hover.has-hover;
-                    always-visible: root.always-show-actions;
+                    revealed: root.show-actions;
                     enabled: pv.url != "";
                     clicked => {
                         root.copy-url(pv.url);
                     }
                 }
-                IconButton {
-                    glyph: "↗";
+                open-btn := IconButton {
+                    glyph: Theme.ico-open;
                     tip: Strings.tooltip-open;
-                    revealed: hover.has-hover;
-                    always-visible: root.always-show-actions;
+                    revealed: root.show-actions;
                     enabled: pv.url != "";
                     clicked => {
                         root.open-url(pv.url);
                     }
                 }
-                IconButton {
-                    glyph: "✕";
+                del-btn := IconButton {
+                    glyph: Theme.ico-delete;
                     tip: Strings.btn-del-port;
-                    revealed: hover.has-hover;
-                    always-visible: root.always-show-actions;
+                    revealed: root.show-actions;
                     danger: true;
                     // Provisioning rows are inert.
                     enabled: pv.status != "provisioning";

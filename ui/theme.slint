@@ -6,25 +6,28 @@ export global Theme {
     //   app.global::<Theme>().set_dark(true)
     in-out property <bool> dark: false;
 
-    // Surfaces
-    out property <color> bg:        dark ? #0f1117 : #ffffff;
-    out property <color> surface:   dark ? #171a21 : #f7f8fa;
-    out property <color> surface-2: dark ? #1e222b : #ffffff;
-    out property <color> border:    dark ? #262b36 : #e5e7eb;
+    // Surfaces — cool slate in dark mode, echoing the ngrok-style palette.
+    out property <color> bg:        dark ? #0b0e14 : #ffffff;
+    out property <color> surface:   dark ? #141821 : #f7f8fa;
+    out property <color> surface-2: dark ? #1c2230 : #ffffff;
+    out property <color> border:    dark ? #232a38 : #e5e7eb;
 
     // Text
     out property <color> text:  dark ? #e6e8ee : #1f2330;
     out property <color> muted: dark ? #9aa3b2 : #6b7280;
 
-    // Accent
-    out property <color> accent:      dark ? #6366f1 : #4f46e5;
-    out property <color> accent-text: #ffffff;
+    // Accent — teal/emerald, the ngrok-style signature. Kept distinct in hue
+    // from `ok` (grass green) so "this is the brand / clickable" never reads as
+    // "this is healthy".
+    out property <color> accent:      dark ? #2dd4bf : #0d9488;
+    out property <color> accent-text: dark ? #07120f : #ffffff;
 
     // Dimmed backdrop behind modal dialogs.
     out property <color> scrim: #00000099;
 
-    // Status
-    out property <color> ok:           dark ? #22c55e : #16a34a;
+    // Status — `ok` is pushed toward a warmer grass green so it stays clearly
+    // separate from the teal accent above.
+    out property <color> ok:           dark ? #4ade80 : #15803d;
     out property <color> warn:         dark ? #f59e0b : #d97706;
     out property <color> down:         dark ? #ef4444 : #dc2626;
     out property <color> idle:         #9ca3af;
@@ -65,6 +68,22 @@ export global Theme {
     out property <length> fs-body:    12px;
     out property <length> fs-caption: 11px;
     out property <string> mono: "Consolas";
+
+    // Icon font — Segoe Fluent Icons ships with Windows 11 (Segoe MDL2 Assets on
+    // Windows 10 shares the same private-use codepoints), so these monochrome
+    // glyphs render reliably and match the minimal theme. The default UI font
+    // lacks coverage for the geometric symbols we used before (they showed as
+    // missing-glyph boxes), so every icon Text sets `font-family: Theme.icon-font`.
+    out property <string> icon-font: "Segoe Fluent Icons";
+    out property <string> ico-copy:           "\u{E8C8}";
+    out property <string> ico-open:           "\u{E8A7}"; // OpenInNewWindow
+    out property <string> ico-delete:         "\u{E74D}";
+    out property <string> ico-settings:       "\u{E713}";
+    out property <string> ico-light:          "\u{E706}"; // Brightness (sun)
+    out property <string> ico-dark:           "\u{E708}"; // QuietHours (moon)
+    out property <string> ico-chevron-down:   "\u{E70D}";
+    out property <string> ico-chevron-right:  "\u{E76C}";
+    out property <string> ico-check:          "\u{E73E}";
 
     // Status color from an identifier ("ok"/"warn"/"down"/"idle"/"host"/"provisioning").
     pure public function status-color(s: string) -> color {

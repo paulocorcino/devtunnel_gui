@@ -2,6 +2,76 @@
 // (dropdown), Check (checkbox), and Collapsible (expandable section).
 // These replace the bare std-widgets, which ignore the app Theme.
 import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+
+// Labeled numeric "days" input with a trailing unit and a hard cap. The value
+// is days only — the CLI's "d" suffix is implicit (added in Rust) and the field
+// clamps to [minimum, maximum] so an expiration can never exceed the service
+// limit (30 days). Consumers seed `text` from an int and read the clamped `days`.
+export component DaysField inherits VerticalLayout {
+    in property <string> label;
+    in property <int> minimum: 1;
+    in property <int> maximum: 30;
+    in-out property <string> text;
+    // Parsed + clamped value the consumer should use on submit.
+    out property <int> days: Math.max(Math.min(root.text.to-float(), root.maximum), root.minimum);
+    callback accepted();
+    callback edited();
+
+    spacing: Theme.gap-sm;
+
+    Text {
+        text: root.label;
+        color: Theme.muted;
+        font-size: Theme.fs-caption;
+    }
+
+    Rectangle {
+        height: Theme.btn-height;
+        background: Theme.bg;
+        border-width: 1px;
+        border-color: input.has-focus ? Theme.accent : Theme.border;
+        border-radius: Theme.gap-sm;
+
+        HorizontalLayout {
+            padding-left: Theme.gap;
+            padding-right: Theme.gap;
+            spacing: Theme.gap-sm;
+
+            input := TextInput {
+                horizontal-stretch: 1;
+                height: 100%;
+                vertical-alignment: center;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+                single-line: true;
+                input-type: number;
+                text <=> root.text;
+                edited => {
+                    root.edited();
+                }
+                accepted => {
+                    // Normalize the displayed value to the clamped result.
+                    root.text = root.days;
+                    root.accepted();
+                }
+                // Snap the text to the clamped value when focus leaves, so a
+                // typed "99" visibly becomes "30".
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        root.text = root.days;
+                    }
+                }
+            }
+            Text {
+                text: Strings.unit-days;
+                color: Theme.muted;
+                font-size: Theme.fs-body;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
 
 // Labeled single-line text input.
 export component Field inherits VerticalLayout {
@@ -10,6 +80,8 @@ export component Field inherits VerticalLayout {
     in-out property <string> text;
     in property <bool> number-only: false;
     callback accepted();
+    // Fired on every keystroke (mirrors std-widgets LineEdit.edited).
+    callback edited();
 
     spacing: Theme.gap-sm;
 
@@ -38,6 +110,9 @@ export component Field inherits VerticalLayout {
             text <=> root.text;
             accepted => {
                 root.accepted();
+            }
+            edited => {
+                root.edited();
             }
         }
         if root.text == "" : Text {
@@ -86,7 +161,8 @@ export component Select inherits VerticalLayout {
                 horizontal-stretch: 1;
             }
             Text {
-                text: "▾";
+                text: Theme.ico-chevron-down;
+                font-family: Theme.icon-font;
                 color: Theme.muted;
                 font-size: Theme.fs-caption;
                 vertical-alignment: center;
@@ -142,6 +218,8 @@ export component Select inherits VerticalLayout {
 export component Check inherits Rectangle {
     in property <string> text;
     in-out property <bool> checked;
+    // Fired with the new state when the user clicks the checkbox.
+    callback toggled(bool);
 
     height: Theme.toggle-height;
 
@@ -159,7 +237,8 @@ export component Check inherits Rectangle {
             Text {
                 width: 100%;
                 height: 100%;
-                text: "✓";
+                text: Theme.ico-check;
+                font-family: Theme.icon-font;
                 visible: root.checked;
                 color: Theme.accent-text;
                 font-size: Theme.fs-caption;
@@ -178,6 +257,7 @@ export component Check inherits Rectangle {
     ta := TouchArea {
         clicked => {
             root.checked = !root.checked;
+            root.toggled(root.checked);
         }
     }
 }
@@ -195,7 +275,8 @@ export component Collapsible inherits VerticalLayout {
             spacing: Theme.gap-sm;
             alignment: start;
             Text {
-                text: root.expanded ? "▾" : "▸";
+                text: root.expanded ? Theme.ico-chevron-down : Theme.ico-chevron-right;
+                font-family: Theme.icon-font;
                 color: Theme.muted;
                 font-size: Theme.fs-caption;
                 vertical-alignment: center;

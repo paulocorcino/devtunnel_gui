@@ -54,10 +54,30 @@ pub struct PortDetail {
     /// The real Public URL. Comes from `show`; cannot be constructed manually.
     #[serde(default)]
     pub port_uri: Option<String>,
-    /// Live traffic/connection metrics. Only present while the port is hosted;
-    /// absent fields degrade to `None` (rendered as "n/a" by the UI).
-    #[serde(default)]
+    /// Live traffic/connection metrics. Only present (as an object) while the
+    /// port is hosted; when idle the CLI returns `status` as a plain summary
+    /// string (e.g. `"0 client connections"`), so [`flex_status`] degrades any
+    /// non-object shape to `None` instead of failing the whole row.
+    #[serde(default, deserialize_with = "flex_status")]
     pub status: Option<PortStatus>,
+}
+
+/// Tolerates the two shapes `status` takes in `show -j` output: an object of
+/// metrics (while hosting) or a summary string / null (while idle). Only the
+/// object shape is mapped to [`PortStatus`]; anything else becomes `None`.
+/// Without this, a string `status` would fail the entire `ShowResult` parse and
+/// drop every port from the row.
+fn flex_status<'de, D>(deserializer: D) -> Result<Option<PortStatus>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        Some(serde_json::Value::Object(_)) => {
+            serde_json::from_value(value.unwrap()).map_err(serde::de::Error::custom)
+        }
+        _ => Ok(None),
+    }
 }
 
 /// The `status` block of a port in `show -j` output. Every field is optional:
@@ -145,6 +165,26 @@ mod tests {
         assert!(s.upload_total.is_none());
         assert!(s.download_total.is_none());
         assert!(s.current_download_rate.is_none());
+    }
+
+    #[test]
+    fn deserializes_port_with_string_status() {
+        // The real CLI returns `status` as a summary STRING when the port is
+        // idle (not hosting). This must not fail the parse — regression for the
+        // "ports disappear" bug where a string status dropped every port.
+        let json = r#"{ "portNumber": 3000, "protocol": "http",
+                        "portUri": "https://x.devtunnels.ms/",
+                        "status": "0 client connections" }"#;
+        let p: PortDetail = serde_json::from_str(json).unwrap();
+        assert_eq!(p.port_number, 3000);
+        assert!(p.status.is_none());
+    }
+
+    #[test]
+    fn deserializes_port_with_null_status() {
+        let json = r#"{ "portNumber": 8080, "status": null }"#;
+        let p: PortDetail = serde_json::from_str(json).unwrap();
+        assert!(p.status.is_none());
     }
 
     #[test]

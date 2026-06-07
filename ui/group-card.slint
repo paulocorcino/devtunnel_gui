@@ -118,10 +118,15 @@ export component GroupCard inherits Rectangle {
                 }
                 VerticalLayout {
                     alignment: center;
-                    IconButton {
-                        glyph: "✕";
+                    del-group-btn := IconButton {
+                        glyph: Theme.ico-delete;
                         tip: Strings.btn-del-group;
-                        revealed: header-hover.has-hover;
+                        // OR the button's own hover so moving onto it does not
+                        // un-hover the header and make the icon flicker.
+                        revealed: header-hover.has-hover || self.hovered;
+                        // Card header sits high in the list; show the tip to the
+                        // left so the viewport edge never clips it.
+                        tip-left: true;
                         danger: true;
                         enabled: !gv.provisioning;
                         clicked => {

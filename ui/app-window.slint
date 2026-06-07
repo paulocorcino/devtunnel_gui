@@ -59,7 +59,9 @@ export component AppWindow inherits Window {
     // Settings: health probe cadence + default expiration (issue #6); seeded
     // from the persisted settings by Rust, edited via the Settings dialog.
     in-out property <int> probe-interval-secs;
-    in-out property <string> default-expiration;
+    // Default expiration for new groups, in whole days (max 30). The CLI "d"
+    // suffix is added in Rust; the UI only ever deals in days.
+    in-out property <int> default-expiration-days: 30;
 
     callback refresh();
     // Asks Rust to re-sync `auto-start-enabled` from the registry, then open the
@@ -69,7 +71,9 @@ export component AppWindow inherits Window {
     callback auto-start-changed(bool);
     // The user edited the probe interval / default expiration in the settings dialog.
     callback probe-interval-changed(int);
-    callback default-expiration-changed(string);
+    callback default-expiration-changed(int /*days*/);
+    // The user toggled dark mode via the top-bar affordance (persist the choice).
+    callback theme-changed(bool /*dark*/);
     // The user clicked "Sign in" in the re-login banner.
     callback sign-in();
     // Start / stop hosting a group (by Real Tunnel ID).
@@ -77,7 +81,7 @@ export component AppWindow inherits Window {
     callback stop(string /*tunnel-id*/);
     callback copy-url(string);
     callback open-url(string);
-    callback create-group(string /*name*/, string /*expiration*/, bool /*anonymous*/,
+    callback create-group(string /*name*/, int /*expiration-days*/, bool /*anonymous*/,
                           string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
     callback add-port(string /*group-id*/, string /*new-name*/, string /*port*/,
                       string /*protocol*/, string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
@@ -150,13 +154,18 @@ export component AppWindow inherits Window {
                 }
                 VerticalLayout {
                     alignment: center;
-                    // Dark-mode toggle affordance.
+                    // Dark-mode toggle: shows the target mode (moon to go dark,
+                    // sun to go light). The choice is persisted via theme-changed.
                     IconButton {
-                        glyph: "⚙";
+                        glyph: Theme.dark ? Theme.ico-light : Theme.ico-dark;
                         tip: Strings.tooltip-settings;
                         always-visible: true;
+                        // Top-right corner: show the tip to the left so the
+                        // window edge never clips it.
+                        tip-left: true;
                         clicked => {
                             Theme.dark = !Theme.dark;
+                            root.theme-changed(Theme.dark);
                         }
                     }
                 }
@@ -251,9 +260,9 @@ export component AppWindow inherits Window {
         width: 100%;
         height: 100%;
         open <=> root.show-create-group;
-        default-expiration: root.default-expiration;
-        submit(name, expiration, anonymous, description, keep-headers, request-timeout) => {
-            root.create-group(name, expiration, anonymous, description, keep-headers, request-timeout);
+        default-expiration-days: root.default-expiration-days;
+        submit(name, expiration-days, anonymous, description, keep-headers, request-timeout) => {
+            root.create-group(name, expiration-days, anonymous, description, keep-headers, request-timeout);
         }
     }
     AddPortDialog {
@@ -286,9 +295,9 @@ export component AppWindow inherits Window {
         probe-interval-changed(secs) => {
             root.probe-interval-changed(secs);
         }
-        default-expiration <=> root.default-expiration;
-        default-expiration-changed(exp) => {
-            root.default-expiration-changed(exp);
+        default-expiration-days <=> root.default-expiration-days;
+        default-expiration-changed(days) => {
+            root.default-expiration-changed(days);
         }
     }
 }

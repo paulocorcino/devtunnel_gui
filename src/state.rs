@@ -25,6 +25,9 @@ pub struct Settings {
     /// Default expiration for new groups and the renewal target (issue #6),
     /// as a free-form CLI string (e.g. `30d`, `12h`). Empty = CLI default.
     pub default_expiration: String,
+    /// Dark-mode preference. `None` = follow the Windows app theme (first run);
+    /// `Some(_)` = the user picked a mode via the top-bar toggle, persisted.
+    pub dark: Option<bool>,
 }
 
 impl Default for Settings {
@@ -35,6 +38,8 @@ impl Default for Settings {
             auto_start: false,
             // Matches the CLI's maximum tunnel lifetime (30 days).
             default_expiration: "30d".to_string(),
+            // First run follows the OS theme until the user chooses explicitly.
+            dark: None,
         }
     }
 }
