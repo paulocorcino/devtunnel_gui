@@ -33,3 +33,5 @@ Desktop.ini
 # Staged-plan gate logs (local evidence, not versioned)
 docs/plans/logs/
 __pycache__/
+# Ralphy run artifacts (scratch, logs, per-run plans)
+.ralphy/
