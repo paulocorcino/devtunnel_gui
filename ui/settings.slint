@@ -1,7 +1,7 @@
 // Settings dialog (issue #5): a minimal modal surface for app-level options.
 // Follows the same backdrop-plus-card pattern as the dialogs in dialogs.slint;
 // visibility is driven by the `open` property bound from AppWindow.
-import { CheckBox } from "std-widgets.slint";
+import { CheckBox, LineEdit } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
@@ -12,6 +12,22 @@ export component SettingsDialog inherits Rectangle {
     // toggled by the checkbox (Rust applies the registry change).
     in-out property <bool> auto-start;
     callback auto-start-changed(bool);
+    // Health probe steady-state cadence in seconds; set from Rust before
+    // opening, re-applied to the live probe on change (issue #6).
+    in-out property <int> probe-interval;
+    callback probe-interval-changed(int);
+    // Default expiration for new groups and the renewal target (issue #6).
+    in-out property <string> default-expiration;
+    callback default-expiration-changed(string);
+
+    // Re-seed the editors from the Rust-set properties every time the dialog
+    // opens (a manual edit severs a plain binding, so reset explicitly).
+    changed open => {
+        if (root.open) {
+            probe-edit.text = root.probe-interval;
+            exp-edit.text = root.default-expiration;
+        }
+    }
 
     visible: root.open;
     background: #00000099;
@@ -48,6 +64,50 @@ export component SettingsDialog inherits Rectangle {
                 toggled => {
                     root.auto-start = self.checked;
                     root.auto-start-changed(self.checked);
+                }
+            }
+
+            VerticalLayout {
+                spacing: Theme.gap-sm;
+                Text {
+                    text: Strings.field-probe-interval;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                }
+                probe-edit := LineEdit {
+                    input-type: number;
+                    edited => {
+                        if (self.text.is-float()) {
+                            root.probe-interval = self.text.to-float();
+                            root.probe-interval-changed(root.probe-interval);
+                        }
+                    }
+                    accepted => {
+                        if (self.text.is-float()) {
+                            root.probe-interval = self.text.to-float();
+                            root.probe-interval-changed(root.probe-interval);
+                        }
+                    }
+                }
+            }
+
+            VerticalLayout {
+                spacing: Theme.gap-sm;
+                Text {
+                    text: Strings.field-default-expiration;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                }
+                exp-edit := LineEdit {
+                    placeholder-text: Strings.ph-expiration;
+                    edited => {
+                        root.default-expiration = self.text;
+                        root.default-expiration-changed(self.text);
+                    }
+                    accepted => {
+                        root.default-expiration = self.text;
+                        root.default-expiration-changed(self.text);
+                    }
                 }
             }
 
