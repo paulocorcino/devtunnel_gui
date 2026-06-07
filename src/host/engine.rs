@@ -1,7 +1,14 @@
 //! SDK-backed host engine (issue #4), compiled only with `--features hosting`.
 //!
-//! A dedicated OS thread owns a single-threaded `tokio` runtime plus an mpsc
-//! command receiver. Each [`HostCommand::Host`] starts a long-running task that:
+//! A lightweight command thread owns no async runtime of its own; it just
+//! dispatches [`HostCommand`]s. Each [`HostCommand::Host`] spawns a **dedicated
+//! OS thread** for that group, owning its own single-threaded `tokio` runtime +
+//! `LocalSet`. Isolating every group on its own runtime stops one busy tunnel
+//! from starving another's port forwards (issue #18) — the previous design ran
+//! all groups' relay + `forward_port_to_tcp` tasks on one shared thread, which
+//! stalled some forwards under concurrent multi-tunnel traffic.
+//!
+//! Each group thread runs a long-running task that:
 //!   1. mints a `host` token (relay connect) and a `manage:ports` token (so the
 //!      SDK's `add_port` → `create_tunnel_port` is authorized) via
 //!      [`crate::devtunnel::mint_token`];
@@ -12,18 +19,20 @@
 //!   4. keeps the connection alive: on relay drop it reconnects with backoff, and
 //!      a ~20h timer re-mints the tokens and reconnects before the ~24h expiry.
 //!
-//! [`HostCommand::Stop`] aborts the group's task (dropping the relay handle) and
+//! [`HostCommand::Stop`] signals the group's cancellation [`Notify`], which ends
+//! its `block_on` (dropping the runtime aborts the relay + forward tasks) and
 //! emits [`HostState::Stopped`]. Every transition is reported via
 //! [`HostEvent::State`].
 //!
-//! `Locale` is not `Send`, so it is constructed inside the engine thread from the
+//! `Locale` is not `Send`, so it is constructed inside each thread from the
 //! detected system locale and only used there.
 
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::sync::mpsc as tokio_mpsc;
+use tokio::sync::Notify;
 use tunnels::connections::RelayTunnelHost;
 use tunnels::contracts::TunnelPort;
 use tunnels::management::{new_tunnel_management, Authorization, TunnelLocator};
@@ -40,52 +49,41 @@ const REMINT_AFTER: Duration = Duration::from_secs(20 * 60 * 60);
 const RECONNECT_BACKOFF_START: Duration = Duration::from_secs(2);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
-/// Starts the engine thread and returns its command channel. The caller wraps the
-/// returned [`Sender`] in a [`super::TunnelHost`].
+/// Starts the engine command thread and returns its command channel. The caller
+/// wraps the returned [`Sender`] in a [`super::TunnelHost`].
 pub fn start(events: Sender<HostEvent>) -> std::sync::mpsc::Sender<HostCommand> {
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<HostCommand>();
 
     std::thread::Builder::new()
         .name("devtunnel-host".to_string())
-        .spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(e) => {
-                    log::error!("host engine: failed to build tokio runtime: {e}");
-                    return;
-                }
-            };
-            let local = tokio::task::LocalSet::new();
-            local.block_on(&rt, run(cmd_rx, events));
-        })
-        .expect("spawning the host engine thread should not fail");
+        .spawn(move || run(cmd_rx, events))
+        .expect("spawning the host engine command thread should not fail");
 
     cmd_tx
 }
 
-/// Engine command loop. Owns a map of active host tasks keyed by Real Tunnel ID.
-async fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<HostEvent>) {
-    // The blocking std receiver is drained on a blocking task and forwarded onto a
-    // tokio channel so the loop can `await` without parking the runtime thread.
-    let (tok_tx, mut tok_rx) = tokio_mpsc::unbounded_channel::<HostCommand>();
-    std::thread::spawn(move || {
-        while let Ok(cmd) = cmd_rx.recv() {
-            if tok_tx.send(cmd).is_err() {
-                break;
-            }
-        }
-    });
+/// Handle to a per-group worker thread: its join handle (used only to check
+/// liveness on a repeat `Host`) and a cancellation [`Notify`] that, when
+/// signalled, ends the group's `block_on` so its runtime drops.
+struct GroupHandle {
+    thread: std::thread::JoinHandle<()>,
+    cancel: Arc<Notify>,
+}
 
+/// Engine command loop. Runs on its own OS thread with no async runtime of its
+/// own — it only dispatches commands. Owns a map of per-group worker threads
+/// keyed by Real Tunnel ID; each group is fully isolated on its own runtime.
+fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<HostEvent>) {
     let loc = Locale::load(&system_locale());
-    let mut tasks: HashMap<String, tokio::task::JoinHandle<()>> = HashMap::new();
+    let mut groups: HashMap<String, GroupHandle> = HashMap::new();
 
-    while let Some(cmd) = tok_rx.recv().await {
+    while let Ok(cmd) = cmd_rx.recv() {
         match cmd {
             HostCommand::Host { tunnel_id } => {
-                if tasks.get(&tunnel_id).is_some_and(|t| !t.is_finished()) {
+                if groups
+                    .get(&tunnel_id)
+                    .is_some_and(|g| !g.thread.is_finished())
+                {
                     log::debug!("host engine: already hosting {tunnel_id}, ignoring Host");
                     continue;
                 }
@@ -104,21 +102,57 @@ async fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<Host
                         continue;
                     }
                 };
-                let events = events.clone();
-                let id = tunnel_id.clone();
-                let handle = tokio::task::spawn_local(async move {
-                    host_group(id, ports, events).await;
-                });
-                tasks.insert(tunnel_id, handle);
+                let handle = spawn_group(tunnel_id.clone(), ports, events.clone());
+                groups.insert(tunnel_id, handle);
             }
             HostCommand::Stop { tunnel_id } => {
-                if let Some(handle) = tasks.remove(&tunnel_id) {
-                    handle.abort();
+                if let Some(group) = groups.remove(&tunnel_id) {
+                    // Wake the group's `select!` so `block_on` returns; dropping its
+                    // runtime aborts the relay + forward tasks. The thread is left
+                    // to wind down on its own (teardown is just dropping handles).
+                    group.cancel.notify_one();
                 }
                 emit(&events, &tunnel_id, HostState::Stopped);
             }
         }
     }
+}
+
+/// Spawns a dedicated OS thread for one group, owning its own current-thread
+/// tokio runtime + `LocalSet` (the SDK's relay/russh state is `!Send`, so each
+/// host task must run via `block_on` on a `LocalSet`). The host task races a
+/// cancellation [`Notify`]: a `Stop` signals it, `block_on` returns, and the
+/// runtime drop tears the group down. Isolating each group on its own runtime is
+/// the fix for multi-tunnel forward starvation (issue #18).
+fn spawn_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent>) -> GroupHandle {
+    let cancel = Arc::new(Notify::new());
+    let cancel_signal = cancel.clone();
+
+    let thread = std::thread::Builder::new()
+        .name(format!("devtunnel-host-{tunnel_id}"))
+        .spawn(move || {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::error!("host engine: failed to build runtime for {tunnel_id}: {e}");
+                    emit(&events, &tunnel_id, HostState::Error(e.to_string()));
+                    return;
+                }
+            };
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&rt, async {
+                tokio::select! {
+                    _ = host_group(tunnel_id, ports, events) => {}
+                    _ = cancel_signal.notified() => {}
+                }
+            });
+        })
+        .expect("spawning a per-group host thread should not fail");
+
+    GroupHandle { thread, cancel }
 }
 
 /// Fetches the port numbers defined for `tunnel_id` via the management CLI.
@@ -133,8 +167,9 @@ fn collect_ports(tunnel_id: &str, loc: &Locale) -> anyhow::Result<Vec<u16>> {
 }
 
 /// Long-running host task for one group: connect → add ports → keep alive, with
-/// reconnect-on-drop and periodic token re-mint. Returns when aborted (Stop) or
-/// on an unrecoverable error.
+/// reconnect-on-drop and periodic token re-mint. Loops forever; the caller's
+/// `select!` ends it when the group is cancelled (Stop). Returns early only on an
+/// unrecoverable error (e.g. expired sign-in).
 async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent>) {
     let mut first_attempt = true;
     let mut backoff = RECONNECT_BACKOFF_START;

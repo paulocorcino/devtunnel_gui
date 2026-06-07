@@ -193,6 +193,8 @@ fn main() -> anyhow::Result<()> {
 
     let loc = Rc::new(Locale::load(&locale::system_locale()));
     apply_strings(&app, &loc);
+    // App version for the About panel (not localized — comes from Cargo).
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
 
     // Tray menu action map (rebuilt on every refresh). Lives only on the UI
     // thread — `Rc`/`RefCell` is enough (nothing crosses thread boundaries).
@@ -1556,6 +1558,16 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_probe_interval(loc.t("field-probe-interval").into());
     s.set_field_default_expiration(loc.t("field-default-expiration").into());
     s.set_btn_close(loc.t("btn-close").into());
+
+    // About
+    s.set_about_title(loc.t("about-title").into());
+    s.set_about_version_label(loc.t("about-version-label").into());
+    s.set_about_tagline(loc.t("about-tagline").into());
+    s.set_about_built_on(loc.t("about-built-on").into());
+    s.set_about_created_by(loc.t("about-created-by").into());
+    s.set_about_link_docs(loc.t("about-link-docs").into());
+    s.set_about_link_repo(loc.t("about-link-repo").into());
+    s.set_about_link_license(loc.t("about-link-license").into());
 
     // Re-login
     s.set_relogin_message(loc.t("relogin-message").into());

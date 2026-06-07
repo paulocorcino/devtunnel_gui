@@ -62,6 +62,8 @@ export component AppWindow inherits Window {
     // Default expiration for new groups, in whole days (max 30). The CLI "d"
     // suffix is added in Rust; the UI only ever deals in days.
     in-out property <int> default-expiration-days: 30;
+    // App version string (from Cargo), shown in the About panel.
+    in property <string> app-version;
 
     callback refresh();
     // Asks Rust to re-sync `auto-start-enabled` from the registry, then open the
@@ -298,6 +300,10 @@ export component AppWindow inherits Window {
         default-expiration-days <=> root.default-expiration-days;
         default-expiration-changed(days) => {
             root.default-expiration-changed(days);
+        }
+        app-version: root.app-version;
+        open-url(url) => {
+            root.open-url(url);
         }
     }
 }

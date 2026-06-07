@@ -230,6 +230,15 @@ this repo uses a local, file-based tracker. Contributions are welcome; please
 keep **all text in English** and route user-facing strings through the Fluent
 i18n pipeline (see [CLAUDE.md](CLAUDE.md)).
 
+## About
+
+DevTunnel GUI is an independent, open-source desktop client created by
+**[Paulo Corcino](mailto:paulo@corcino.com.br)**, built on top of
+**[Microsoft Dev Tunnels](https://learn.microsoft.com/azure/developer/dev-tunnels/overview)**
+— Microsoft's free, security-focused tunneling service — and its official CLI
+and SDK. It is not affiliated with or endorsed by Microsoft. Released under the
+**[MIT License](LICENSE)**.
+
 ## License
 
 [MIT](LICENSE) © 2026 Paulo Corcino.

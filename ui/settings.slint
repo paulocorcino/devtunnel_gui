@@ -8,8 +8,26 @@ import { TxtButton } from "controls.slint";
 import { Field, DaysField, Check } from "field.slint";
 import { DialogShell } from "dialogs.slint";
 
+// Clickable inline link rendered in the accent color. Opens an external URL
+// via the AppWindow's open-url callback (handled by Rust through the `open` crate).
+component Link inherits Text {
+    callback clicked();
+    color: Theme.accent;
+    font-size: Theme.fs-caption;
+    TouchArea {
+        mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
 export component SettingsDialog inherits Rectangle {
     in-out property <bool> open;
+    // App version (from Cargo) shown in the About panel.
+    in property <string> app-version;
+    // Open an external URL in the browser (forwarded to AppWindow.open-url).
+    callback open-url(string);
     // Current "start with Windows" state; set from Rust before opening and
     // toggled by the checkbox (Rust applies the registry change).
     in-out property <bool> auto-start;
@@ -77,6 +95,66 @@ export component SettingsDialog inherits Rectangle {
             }
             accepted => {
                 root.commit-expiration();
+            }
+        }
+
+        // ---- About ----
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+        VerticalLayout {
+            spacing: Theme.gap-sm;
+
+            Text {
+                text: Strings.about-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 700;
+            }
+            Text {
+                text: Strings.app-title + " · " + Strings.about-version-label + " " + root.app-version;
+                color: Theme.text;
+                font-size: Theme.fs-body;
+            }
+            Text {
+                text: Strings.about-tagline;
+                color: Theme.muted;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: Strings.about-built-on;
+                color: Theme.muted;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+            Text {
+                text: Strings.about-created-by;
+                color: Theme.text;
+                font-size: Theme.fs-caption;
+            }
+            HorizontalLayout {
+                spacing: Theme.gap;
+                alignment: start;
+                Link {
+                    text: Strings.about-link-docs;
+                    clicked => {
+                        root.open-url("https://learn.microsoft.com/azure/developer/dev-tunnels/overview");
+                    }
+                }
+                Link {
+                    text: Strings.about-link-repo;
+                    clicked => {
+                        root.open-url("https://github.com/paulocorcino/devtunnel_gui");
+                    }
+                }
+                Link {
+                    text: Strings.about-link-license;
+                    clicked => {
+                        root.open-url("https://github.com/paulocorcino/devtunnel_gui/blob/main/LICENSE");
+                    }
+                }
             }
         }
 

@@ -85,6 +85,16 @@ field-probe-interval = Probe interval (seconds)
 field-default-expiration = Default expiration
 btn-close = Close
 
+## About
+about-title = About
+about-version-label = Version
+about-tagline = Manage Microsoft Dev Tunnels from your Windows tray.
+about-built-on = Built on Microsoft Dev Tunnels — Microsoft's free, security-focused tunneling service — and its official CLI and SDK. Not affiliated with or endorsed by Microsoft.
+about-created-by = Created by Paulo Corcino
+about-link-docs = Microsoft Dev Tunnels docs
+about-link-repo = Project on GitHub
+about-link-license = MIT License
+
 ## Preflight banner / re-login
 banner-cli-missing-title = Dev Tunnels CLI not found
 banner-cli-missing-body = The `devtunnel` CLI is required but was not found on PATH.
