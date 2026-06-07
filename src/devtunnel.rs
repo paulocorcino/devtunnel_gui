@@ -65,6 +65,38 @@ pub fn preflight() -> Preflight {
     }
 }
 
+/// Official Dev Tunnels CLI install page — opened as a fallback when `winget`
+/// itself is unavailable, so the user can install the CLI manually.
+pub const CLI_INSTALL_URL: &str =
+    "https://learn.microsoft.com/azure/developer/dev-tunnels/get-started";
+
+/// Attempts to install the Dev Tunnels CLI via `winget`.
+///
+/// Returns `Ok(true)` when the install succeeded, `Ok(false)` when `winget` is
+/// not available (the caller should open [`CLI_INSTALL_URL`] instead), and `Err`
+/// when `winget` ran but reported a failure. Runs off the UI thread.
+pub fn install_cli() -> Result<bool> {
+    let out = Command::new("winget")
+        .args([
+            "install",
+            "-e",
+            "--id",
+            "Microsoft.devtunnel",
+            "--accept-package-agreements",
+            "--accept-source-agreements",
+        ])
+        .output();
+    match out {
+        // winget not found on PATH — signal the caller to open the download page.
+        Err(_) => Ok(false),
+        Ok(o) if o.status.success() => Ok(true),
+        Ok(o) => Err(anyhow!(
+            "winget install failed: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        )),
+    }
+}
+
 /// Pure decision logic for [`preflight`]'s login probe: classifies the result
 /// of `devtunnel user show -j` as logged-in (`true`) or logged-out (`false`).
 /// A failed command or an output reporting "not logged in" means logged out.
