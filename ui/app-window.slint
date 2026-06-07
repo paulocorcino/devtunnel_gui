@@ -65,6 +65,16 @@ export component AppWindow inherits Window {
     // App version string (from Cargo), shown in the About panel.
     in property <string> app-version;
 
+    // Settings → Requirements checklist: per-item satisfied/not flags, refreshed
+    // by Rust when the dialog opens and after install/auto-start actions.
+    in property <bool> req-cli-ok;
+    in property <bool> req-login-ok;
+    in property <bool> req-installed-ok;
+    in property <bool> req-shortcut-ok;
+    in property <bool> req-autostart-ok;
+    // The user clicked "Install CLI" in the requirements checklist.
+    callback install-cli();
+
     callback refresh();
     // Asks Rust to re-sync `auto-start-enabled` from the registry, then open the
     // Settings dialog.
@@ -302,6 +312,17 @@ export component AppWindow inherits Window {
             root.default-expiration-changed(days);
         }
         app-version: root.app-version;
+        req-cli-ok: root.req-cli-ok;
+        req-login-ok: root.req-login-ok;
+        req-installed-ok: root.req-installed-ok;
+        req-shortcut-ok: root.req-shortcut-ok;
+        req-autostart-ok: root.req-autostart-ok;
+        install-cli => {
+            root.install-cli();
+        }
+        sign-in => {
+            root.sign-in();
+        }
         open-url(url) => {
             root.open-url(url);
         }

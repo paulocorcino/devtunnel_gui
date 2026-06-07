@@ -22,10 +22,43 @@ component Link inherits Text {
     }
 }
 
+// One row of the requirements checklist: a status glyph (✓ green / ✗ red), a
+// label, and an optional action button supplied as a child (shown by the caller
+// only when the requirement is not satisfied).
+component ReqRow inherits HorizontalLayout {
+    in property <bool> ok;
+    in property <string> label;
+    spacing: Theme.gap;
+    Text {
+        text: root.ok ? Theme.ico-check : Theme.ico-x;
+        font-family: Theme.icon-font;
+        color: root.ok ? Theme.ok : Theme.down;
+        font-size: Theme.fs-body;
+        vertical-alignment: center;
+    }
+    Text {
+        text: root.label;
+        color: Theme.text;
+        font-size: Theme.fs-body;
+        vertical-alignment: center;
+        horizontal-stretch: 1;
+    }
+    @children
+}
+
 export component SettingsDialog inherits Rectangle {
     in-out property <bool> open;
     // App version (from Cargo) shown in the About panel.
     in property <string> app-version;
+    // Requirements checklist state (set from Rust each time the dialog opens).
+    in property <bool> req-cli-ok;
+    in property <bool> req-login-ok;
+    in property <bool> req-installed-ok;
+    in property <bool> req-shortcut-ok;
+    in property <bool> req-autostart-ok;
+    // Requirements actions.
+    callback install-cli();
+    callback sign-in();
     // Open an external URL in the browser (forwarded to AppWindow.open-url).
     callback open-url(string);
     // Current "start with Windows" state; set from Rust before opening and
@@ -67,6 +100,59 @@ export component SettingsDialog inherits Rectangle {
         title: Strings.settings-title;
         confirm => {
             root.open = false;
+        }
+
+        // ---- Requirements checklist ----
+        VerticalLayout {
+            spacing: Theme.gap-sm;
+            Text {
+                text: Strings.req-title;
+                color: Theme.text;
+                font-size: Theme.fs-section;
+                font-weight: 700;
+            }
+            ReqRow {
+                ok: root.req-cli-ok;
+                label: Strings.req-cli;
+                if !root.req-cli-ok: TxtButton {
+                    text: Strings.btn-install-cli;
+                    clicked => {
+                        root.install-cli();
+                    }
+                }
+            }
+            ReqRow {
+                ok: root.req-login-ok;
+                label: Strings.req-login;
+                if !root.req-login-ok: TxtButton {
+                    text: Strings.btn-sign-in;
+                    clicked => {
+                        root.sign-in();
+                    }
+                }
+            }
+            ReqRow {
+                ok: root.req-installed-ok;
+                label: Strings.req-installed;
+            }
+            ReqRow {
+                ok: root.req-shortcut-ok;
+                label: Strings.req-shortcut;
+            }
+            ReqRow {
+                ok: root.req-autostart-ok;
+                label: Strings.req-autostart;
+            }
+            Text {
+                text: Strings.req-install-hint;
+                color: Theme.muted;
+                font-size: Theme.fs-caption;
+                wrap: word-wrap;
+            }
+        }
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
         }
 
         Check {

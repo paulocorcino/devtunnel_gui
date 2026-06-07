@@ -30,11 +30,12 @@ pub fn is_enabled() -> bool {
         .is_ok()
 }
 
-/// Writes the Run entry pointing at the current executable.
-pub fn enable() -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
+/// Writes the Run entry pointing at a specific executable path. Used when the
+/// app relocates itself into the per-user programs folder and must register the
+/// *new* location before relaunching from it.
+pub fn enable_at(exe: &Path) -> anyhow::Result<()> {
     let (key, _) = RegKey::predef(HKEY_CURRENT_USER).create_subkey(RUN_KEY_PATH)?;
-    key.set_value(RUN_VALUE_NAME, &run_command(&exe))?;
+    key.set_value(RUN_VALUE_NAME, &run_command(exe))?;
     Ok(())
 }
 
@@ -48,15 +49,6 @@ pub fn disable() -> anyhow::Result<()> {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e.into()),
-    }
-}
-
-/// Applies the requested auto-start state: enables or disables the Run entry.
-pub fn set_enabled(enabled: bool) -> anyhow::Result<()> {
-    if enabled {
-        enable()
-    } else {
-        disable()
     }
 }
 

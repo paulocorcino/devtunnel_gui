@@ -6,6 +6,8 @@ mod autostart;
 mod devtunnel;
 mod host;
 mod icon_render;
+#[cfg(windows)]
+mod install;
 mod locale;
 mod logbuf;
 mod model;
@@ -182,6 +184,27 @@ fn main() -> anyhow::Result<()> {
     // tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=trace`).
     let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=debug,tunnels=info").install();
 
+    // Relocation handshake: when launched by a just-installed copy with
+    // `--relocated-from <path>`, delete the portable original we were moved from.
+    // Runs on a detached thread because the delete retries for up to ~3 s while
+    // the previous process exits and releases the file lock — never block startup.
+    #[cfg(windows)]
+    {
+        let mut args = std::env::args().skip(1);
+        while let Some(a) = args.next() {
+            if a == install::RELOCATED_FROM_FLAG {
+                match args.next() {
+                    Some(old) => {
+                        std::thread::spawn(move || {
+                            install::cleanup_relocated(std::path::Path::new(&old));
+                        });
+                    }
+                    None => log::warn!("install: {} given with no path", install::RELOCATED_FROM_FLAG),
+                }
+            }
+        }
+    }
+
     // winit registers the window class with a null icon, so the title bar and
     // taskbar would show the generic default. Install the winit backend with a
     // hook that sets our brand icon on every window at creation time. (The
@@ -276,6 +299,7 @@ fn main() -> anyhow::Result<()> {
         let enabled = autostart::is_enabled();
         app.set_auto_start_enabled(enabled);
         app_state.borrow_mut().settings.auto_start = enabled;
+        refresh_requirements(&app);
     }
     {
         let weak = app.as_weak();
@@ -283,14 +307,20 @@ fn main() -> anyhow::Result<()> {
         app.on_auto_start_changed(move |enabled| {
             #[cfg(windows)]
             {
-                if let Err(e) = autostart::set_enabled(enabled) {
-                    log::warn!("autostart: failed to apply toggle: {e}");
+                if enabled {
+                    enable_auto_start(&app_state);
+                    // `enable_auto_start` exits the process when it relocates a
+                    // portable install, so reaching here means we either were
+                    // already installed or the relocation could not hand off.
+                } else if let Err(e) = autostart::disable() {
+                    log::warn!("autostart: failed to disable: {e}");
                 }
                 // Re-read the registry so the checkbox reflects the actual state
                 // (reverts the optimistic toggle if the write failed).
                 let actual = autostart::is_enabled();
                 if let Some(a) = weak.upgrade() {
                     a.set_auto_start_enabled(actual);
+                    refresh_requirements(&a);
                 }
                 let mut st = app_state.borrow_mut();
                 st.settings.auto_start = actual;
@@ -302,6 +332,29 @@ fn main() -> anyhow::Result<()> {
                 st.settings.auto_start = enabled;
                 st.save();
             }
+        });
+    }
+    // ---- Settings: install the Dev Tunnels CLI on demand (winget + fallback) ----
+    {
+        let pf_tx = pf_tx.clone();
+        app.on_install_cli(move || {
+            let pf_tx = pf_tx.clone();
+            std::thread::spawn(move || match devtunnel::install_cli() {
+                // Re-run preflight so the banner + requirements rows update.
+                Ok(true) => {
+                    let _ = pf_tx.send(devtunnel::preflight());
+                }
+                // winget unavailable — open the official install page instead.
+                Ok(false) => {
+                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                }
+                // winget ran but failed: log it and fall back to the install page
+                // so the user who clicked the button still gets somewhere to go.
+                Err(e) => {
+                    log::warn!("install_cli: {e}");
+                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                }
+            });
         });
     }
     // ---- Settings: probe interval + default expiration (issue #6) ----
@@ -364,7 +417,11 @@ fn main() -> anyhow::Result<()> {
         app.on_open_settings(move || {
             if let Some(a) = weak.upgrade() {
                 #[cfg(windows)]
-                a.set_auto_start_enabled(autostart::is_enabled());
+                {
+                    a.set_auto_start_enabled(autostart::is_enabled());
+                    // Recompute the requirements checklist each time it opens.
+                    refresh_requirements(&a);
+                }
                 // Re-seed the editable fields from the persisted settings so the
                 // dialog always opens showing the current values.
                 let st = app_state.borrow();
@@ -769,6 +826,9 @@ fn main() -> anyhow::Result<()> {
                     };
                     if let Some(a) = weak.upgrade() {
                         a.set_app_state(app_state.into());
+                        // Keep the Settings checklist in sync with CLI/login state.
+                        #[cfg(windows)]
+                        refresh_requirements(&a);
                     }
                     update_tray_icon(&tray, app_state);
                     if pf == devtunnel::Preflight::Ok {
@@ -993,6 +1053,67 @@ fn main() -> anyhow::Result<()> {
     }
     slint::run_event_loop_until_quit()?;
     Ok(())
+}
+
+/// Refreshes the Settings "Requirements" checklist properties from the live
+/// environment. CLI/login state is read from the already-computed preflight
+/// `app-state`; install/shortcut/auto-start are cheap registry + file checks.
+#[cfg(windows)]
+fn refresh_requirements(app: &AppWindow) {
+    let app_state = app.get_app_state();
+    app.set_req_cli_ok(app_state != "cli-missing");
+    app.set_req_login_ok(app_state == "ready");
+    app.set_req_installed_ok(install::is_installed());
+    app.set_req_shortcut_ok(install::shortcut_exists());
+    app.set_req_autostart_ok(autostart::is_enabled());
+}
+
+/// Enables "Start with Windows", performing the full per-user install when the
+/// app is running as a portable executable: relocate into `%LOCALAPPDATA%\
+/// Programs`, create the Start-menu shortcut, register auto-start at the new
+/// path, then relaunch from there and exit (the fresh instance deletes the
+/// portable original). When already installed, just (re)writes the Run entry and
+/// ensures the shortcut exists.
+#[cfg(windows)]
+fn enable_auto_start(app_state: &Rc<RefCell<state::AppState>>) {
+    if install::is_installed() {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Err(e) = autostart::enable_at(&exe) {
+                log::warn!("autostart: failed to set Run entry: {e}");
+            }
+            if let Err(e) = install::create_start_menu_shortcut(&exe) {
+                log::warn!("install: failed to create shortcut: {e}");
+            }
+        }
+        return;
+    }
+
+    // Portable: move into the programs folder and hand off to the new copy.
+    let new_exe = match install::install_self() {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("install: relocation failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = install::create_start_menu_shortcut(&new_exe) {
+        log::warn!("install: failed to create shortcut: {e}");
+    }
+    if let Err(e) = autostart::enable_at(&new_exe) {
+        log::warn!("autostart: failed to set Run entry: {e}");
+    }
+    // Persist the enabled state before relaunching so the fresh instance reflects it.
+    {
+        let mut st = app_state.borrow_mut();
+        st.settings.auto_start = true;
+        st.save();
+    }
+    if let Ok(old) = std::env::current_exe() {
+        if install::relaunch_from(&new_exe, &old).is_ok() {
+            std::process::exit(0);
+        }
+        log::warn!("install: relaunch from new location failed; staying in place");
+    }
 }
 
 /// True when Windows is set to dark app mode (`AppsUseLightTheme == 0`).
@@ -1562,6 +1683,16 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_field_protocol(loc.t("field-protocol").into());
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
+
+    // Settings — requirements checklist
+    s.set_req_title(loc.t("req-title").into());
+    s.set_req_cli(loc.t("req-cli").into());
+    s.set_req_login(loc.t("req-login").into());
+    s.set_req_installed(loc.t("req-installed").into());
+    s.set_req_shortcut(loc.t("req-shortcut").into());
+    s.set_req_autostart(loc.t("req-autostart").into());
+    s.set_btn_install_cli(loc.t("btn-install-cli").into());
+    s.set_req_install_hint(loc.t("req-install-hint").into());
 
     // Settings
     s.set_settings_title(loc.t("settings-title").into());

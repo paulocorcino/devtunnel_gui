@@ -78,6 +78,16 @@ badge-down = Down
 badge-provisioning = Provisioning…
 badge-hosted-external = Hosted elsewhere
 
+## Settings — requirements checklist
+req-title = Requirements
+req-cli = Dev Tunnels CLI installed
+req-login = Signed in
+req-installed = Installed in your programs folder
+req-shortcut = Start-menu shortcut created
+req-autostart = Starts with Windows
+btn-install-cli = Install CLI
+req-install-hint = Turning on "Start with Windows" installs the app into your user programs folder, adds a Start-menu shortcut, and enables auto-start.
+
 ## Settings
 settings-title = Settings
 field-auto-start = Start with Windows

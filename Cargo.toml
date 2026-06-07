@@ -38,6 +38,9 @@ ureq = { version = "2", default-features = false, features = ["tls"], optional =
 winreg = "0.55"
 # Windows toast for the re-login case only (issue #5).
 tauri-winrt-notification = "0.7"
+# Pure-Rust writer for Windows .lnk shortcuts — used to create the Start-menu
+# entry when the app installs itself into %LOCALAPPDATA%\Programs. Avoids COM.
+mslnk = "0.1"
 
 [features]
 spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
