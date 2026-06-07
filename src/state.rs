@@ -22,6 +22,9 @@ pub struct Settings {
     pub probe_interval_secs: u64,
     /// Whether the app registers itself to start with Windows (HKCU Run key).
     pub auto_start: bool,
+    /// Default expiration for new groups and the renewal target (issue #6),
+    /// as a free-form CLI string (e.g. `30d`, `12h`). Empty = CLI default.
+    pub default_expiration: String,
 }
 
 impl Default for Settings {
@@ -30,6 +33,8 @@ impl Default for Settings {
             // Conservative default matching the probe engine's steady-state cadence.
             probe_interval_secs: 60,
             auto_start: false,
+            // Matches the CLI's maximum tunnel lifetime (30 days).
+            default_expiration: "30d".to_string(),
         }
     }
 }
@@ -191,10 +196,12 @@ mod tests {
         st.add_auto_host("frontend.brs");
         st.settings.auto_start = true;
         st.settings.probe_interval_secs = 30;
+        st.settings.default_expiration = "12h".to_string();
         st.save_to(&path).unwrap();
 
         let loaded = AppState::load_from(&path);
         assert_eq!(loaded, st);
+        assert_eq!(loaded.settings.default_expiration, "12h");
     }
 
     #[test]
@@ -219,6 +226,8 @@ mod tests {
         let st = AppState::load_from(&path);
         assert!(st.contains_auto_host("x.brs"));
         assert_eq!(st.settings, Settings::default());
+        // An older state file without the field falls back to the 30d default.
+        assert_eq!(st.settings.default_expiration, "30d");
     }
 
     #[test]
