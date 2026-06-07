@@ -1170,7 +1170,9 @@ fn apply_rows(
 
     match result {
         Ok(rows) => {
-            let count = rows.len();
+            // Count real ports only: a portless group is carried as a `port == 0`
+            // row, which must not inflate the header's port tally.
+            let count = rows.iter().filter(|r| r.port != 0).count();
 
             // Build the group picker (deduped by Real Tunnel ID, order preserved);
             // append the "+ New group…" entry last with an empty id.
@@ -1235,13 +1237,15 @@ fn rebuild_rows(
     // stable `row-index` used to key the expandable detail panel (issue #17). The
     // same index drives `selected-index` so the open panel survives reloads.
     // Optimistic delete (#13) hides ports/groups awaiting their confirming refresh.
+    // Only a group-level delete (`(id, None)`) drops the whole card here; a
+    // port-level delete (`(id, Some(port))`) keeps the row in the index space and
+    // is skipped further down when attaching ports. This way deleting a group's
+    // last port leaves the card standing (as portless) instead of flickering the
+    // whole card out and back when the confirming refresh lands.
     let visible_rows: Vec<&devtunnel::Row> = st
         .rows
         .iter()
-        .filter(|r| {
-            !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port)))
-                && !st.hidden.contains(&(r.tunnel_id.clone(), None))
-        })
+        .filter(|r| !st.hidden.contains(&(r.tunnel_id.clone(), None)))
         .collect();
 
     // Fold the flat rows into groups (Real Tunnel ID order preserved). Ports are
@@ -1271,7 +1275,9 @@ fn rebuild_rows(
             }
         };
         // A port==0 row is a portless group: keep the card, skip the port row.
-        if r.port != 0 {
+        // A port hidden by an optimistic delete (#13) likewise keeps its card but
+        // drops the port row until the reflush refresh confirms the deletion.
+        if r.port != 0 && !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port))) {
             groups[gi].has_port = true;
             ports[gi].push(PortView {
                 port: r.port,
@@ -1330,12 +1336,17 @@ fn rebuild_rows(
     let mut selected = -1;
     let mut stale_detail = false;
     if let Some((tid, port)) = st.detail.as_ref() {
+        // A port hidden by an optimistic delete is still in `visible_rows` (to keep
+        // its group card alive), so check the hidden set too: deleting the expanded
+        // port must collapse the panel rather than leave it pointing at a gone row.
+        let deleting = st.hidden.contains(&(tid.clone(), Some(*port)))
+            || st.hidden.contains(&(tid.clone(), None));
         match visible_rows
             .iter()
             .position(|r| r.tunnel_id == tid.as_str() && r.port == *port)
         {
-            Some(i) => selected = i as i32,
-            None => stale_detail = true,
+            Some(i) if !deleting => selected = i as i32,
+            _ => stale_detail = true,
         }
     }
 
