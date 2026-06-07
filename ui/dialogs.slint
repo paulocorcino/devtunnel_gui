@@ -84,6 +84,8 @@ component DialogShell inherits Rectangle {
 // ---- New group ----
 export component CreateGroupDialog inherits Rectangle {
     in-out property <bool> open;
+    // Pre-filled expiration (issue #6): follows Settings.default_expiration.
+    in property <string> default-expiration: "30d";
     callback submit(string /*name*/, string /*expiration*/, bool /*anonymous*/,
                     string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
     callback cancel();
@@ -92,7 +94,7 @@ export component CreateGroupDialog inherits Rectangle {
     changed open => {
         if (root.open) {
             name-f.text = "";
-            exp-f.text = "30d";
+            exp-f.text = root.default-expiration;
             anon-c.checked = true;
             desc-f.text = "";
             kh-c.checked = false;
@@ -129,7 +131,7 @@ export component CreateGroupDialog inherits Rectangle {
         exp-f := Field {
             label: Strings.field-expiration;
             placeholder: Strings.ph-expiration;
-            text: "30d";
+            text: root.default-expiration;
             accepted => {
                 root.do-submit();
             }

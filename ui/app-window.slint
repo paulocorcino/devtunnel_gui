@@ -56,6 +56,10 @@ export component AppWindow inherits Window {
 
     // Settings: current "start with Windows" state (set from Rust at startup).
     in-out property <bool> auto-start-enabled;
+    // Settings: health probe cadence + default expiration (issue #6); seeded
+    // from the persisted settings by Rust, edited via the Settings dialog.
+    in-out property <int> probe-interval-secs;
+    in-out property <string> default-expiration;
 
     callback refresh();
     // Asks Rust to re-sync `auto-start-enabled` from the registry, then open the
@@ -63,6 +67,9 @@ export component AppWindow inherits Window {
     callback open-settings();
     // The user toggled the auto-start checkbox in the settings dialog.
     callback auto-start-changed(bool);
+    // The user edited the probe interval / default expiration in the settings dialog.
+    callback probe-interval-changed(int);
+    callback default-expiration-changed(string);
     // The user clicked "Sign in" in the re-login banner.
     callback sign-in();
     // Start / stop hosting a group (by Real Tunnel ID).
@@ -244,6 +251,7 @@ export component AppWindow inherits Window {
         width: 100%;
         height: 100%;
         open <=> root.show-create-group;
+        default-expiration: root.default-expiration;
         submit(name, expiration, anonymous, description, keep-headers, request-timeout) => {
             root.create-group(name, expiration, anonymous, description, keep-headers, request-timeout);
         }
@@ -273,6 +281,14 @@ export component AppWindow inherits Window {
         auto-start <=> root.auto-start-enabled;
         auto-start-changed(enabled) => {
             root.auto-start-changed(enabled);
+        }
+        probe-interval <=> root.probe-interval-secs;
+        probe-interval-changed(secs) => {
+            root.probe-interval-changed(secs);
+        }
+        default-expiration <=> root.default-expiration;
+        default-expiration-changed(exp) => {
+            root.default-expiration-changed(exp);
         }
     }
 }
