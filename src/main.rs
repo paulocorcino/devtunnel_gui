@@ -387,6 +387,11 @@ fn main() -> anyhow::Result<()> {
     // successful load (set at startup and again after a successful re-login).
     let auto_resume_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
 
+    // One-shot flag (issue #6): renew the auto-host groups (expiration window +
+    // anonymous ACE) after the first successful load; the 12h timer below keeps
+    // renewing while the app runs.
+    let renew_pending: Rc<Cell<bool>> = Rc::new(Cell::new(true));
+
     // ---- Create group ----
     {
         let weak = app.as_weak();
@@ -702,6 +707,7 @@ fn main() -> anyhow::Result<()> {
         let app_state = app_state.clone();
         let tunnel_host = tunnel_host.clone();
         let auto_resume_pending = auto_resume_pending.clone();
+        let renew_pending = renew_pending.clone();
         let tx = tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
@@ -863,6 +869,15 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
+                // One-shot renewal (issue #6): after the first successful load,
+                // re-apply the expiration window + anonymous ACE for every
+                // auto-host group. Subprocess-only — never touches the host engine.
+                if load_ok && renew_pending.get() {
+                    renew_pending.set(false);
+                    let st = app_state.borrow();
+                    renew_async(st.auto_host.clone(), st.settings.default_expiration.clone());
+                }
+
                 // Probe results -> update per-port health status.
                 #[cfg(feature = "hosting")]
                 let mut probe_changed = false;
@@ -898,6 +913,23 @@ fn main() -> anyhow::Result<()> {
                         rebuild_rows(&a, &tray, &actions, &state, &loc);
                     }
                 }
+            },
+        );
+    }
+
+    // ---- Periodic renewal (issue #6): while the app runs, re-apply the
+    // expiration window + anonymous ACE for the auto-host groups every 12h.
+    // `update --expiration` is idempotent, so the unconditional cadence keeps
+    // the window far inside the 30-day limit without parsing timestamps.
+    let renew_timer = slint::Timer::default();
+    {
+        let app_state = app_state.clone();
+        renew_timer.start(
+            slint::TimerMode::Repeated,
+            Duration::from_secs(12 * 60 * 60),
+            move || {
+                let st = app_state.borrow();
+                renew_async(st.auto_host.clone(), st.settings.default_expiration.clone());
             },
         );
     }
@@ -1001,6 +1033,27 @@ fn load_async(
     std::thread::spawn(move || {
         let loc = Locale::load(&lang);
         let _ = tx.send((None, None, devtunnel::fetch_rows(&loc)));
+    });
+}
+
+/// Renews every auto-host group on a background thread (issue #6): re-applies
+/// the expiration window and the anonymous ACE via one-shot subprocess calls.
+/// Independent of in-process SDK hosting by construction — it never sends a
+/// `HostCommand`, so an active host connection is not disturbed. Failures are
+/// logged, never surfaced (the next cycle retries).
+fn renew_async(ids: Vec<String>, expiration: String) {
+    if ids.is_empty() {
+        return;
+    }
+    let lang = locale::system_locale();
+    std::thread::spawn(move || {
+        let loc = Locale::load(&lang);
+        for id in ids {
+            match devtunnel::renew_tunnel(&id, &expiration, &loc) {
+                Ok(()) => log::info!("renew: refreshed expiration + anonymous ACE for {id}"),
+                Err(e) => log::warn!("renew: failed for {id}: {e}"),
+            }
+        }
     });
 }
 
