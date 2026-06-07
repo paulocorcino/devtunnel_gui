@@ -298,14 +298,50 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // ---- Settings: probe interval + default expiration (issue #6) ----
+    // Seed the dialog properties from the persisted settings; the handlers
+    // persist edits and (hosting build) re-target the live probe immediately.
+    {
+        let st = app_state.borrow();
+        app.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
+        app.set_default_expiration(st.settings.default_expiration.clone().into());
+    }
+    {
+        let app_state = app_state.clone();
+        #[cfg(feature = "hosting")]
+        let probe_cmd_tx = probe_cmd_tx.clone();
+        app.on_probe_interval_changed(move |secs| {
+            let secs = (secs.max(1)) as u64;
+            let mut st = app_state.borrow_mut();
+            st.settings.probe_interval_secs = secs;
+            st.save();
+            // Re-target the live probe without a restart.
+            #[cfg(feature = "hosting")]
+            let _ = probe_cmd_tx.send(probe::ProbeCommand::SetInterval(Duration::from_secs(secs)));
+        });
+    }
+    {
+        let app_state = app_state.clone();
+        app.on_default_expiration_changed(move |exp| {
+            let mut st = app_state.borrow_mut();
+            st.settings.default_expiration = exp.trim().to_string();
+            st.save();
+        });
+    }
     {
         // Re-sync the toggle from the registry each time the Settings dialog
         // opens, in case the Run entry changed out of band, then show it.
         let weak = app.as_weak();
+        let app_state = app_state.clone();
         app.on_open_settings(move || {
             if let Some(a) = weak.upgrade() {
                 #[cfg(windows)]
                 a.set_auto_start_enabled(autostart::is_enabled());
+                // Re-seed the editable fields from the persisted settings so the
+                // dialog always opens showing the current values.
+                let st = app_state.borrow();
+                a.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
+                a.set_default_expiration(st.settings.default_expiration.clone().into());
                 a.set_show_settings(true);
             }
         });
