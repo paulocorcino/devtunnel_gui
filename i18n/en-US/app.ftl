@@ -81,6 +81,7 @@ badge-hosted-external = Hosted elsewhere
 settings-title = Settings
 field-auto-start = Start with Windows
 field-probe-interval = Probe interval (seconds)
+field-default-expiration = Default expiration
 btn-close = Close
 
 ## Preflight banner / re-login

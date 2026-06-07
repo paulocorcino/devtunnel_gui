@@ -1414,6 +1414,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_settings_title(loc.t("settings-title").into());
     s.set_field_auto_start(loc.t("field-auto-start").into());
     s.set_field_probe_interval(loc.t("field-probe-interval").into());
+    s.set_field_default_expiration(loc.t("field-default-expiration").into());
     s.set_btn_close(loc.t("btn-close").into());
 
     // Re-login
