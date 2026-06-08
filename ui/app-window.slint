@@ -55,6 +55,9 @@ export component AppWindow inherits Window {
     // Non-ready states show the PreflightBanner above the list. The "relogin"
     // state also covers the expired CLI sign-in case.
     in property <string> app-state: "ready";
+    // True while the CLI install (winget) is running; drives the banner's
+    // "Installing…" + disabled state on the Install CLI button.
+    in property <bool> installing;
 
     // Settings: current "start with Windows" state (set from Rust at startup).
     in-out property <bool> auto-start-enabled;
@@ -192,8 +195,15 @@ export component AppWindow inherits Window {
         // ---- Preflight banner (CLI missing / re-login) — issue #14 ----
         if root.app-state != "ready" : PreflightBanner {
             app-state: root.app-state;
+            installing: root.installing;
             sign-in => {
                 root.sign-in();
+            }
+            install-cli => {
+                root.install-cli();
+            }
+            open-settings => {
+                root.open-settings();
             }
         }
 

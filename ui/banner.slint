@@ -8,8 +8,15 @@ export component PreflightBanner inherits Rectangle {
     // "cli-missing" | "relogin" (the parent shows this banner only when the
     // app state is not "ready").
     in property <string> app-state;
+    // True while `winget install` is running — disables Install CLI and swaps
+    // its label for the in-progress "Installing…" text.
+    in property <bool> installing;
     // User clicked "Sign in" — Rust runs `devtunnel user login`.
     callback sign-in();
+    // User clicked "Install CLI" — Rust runs `winget install` (cli-missing state).
+    callback install-cli();
+    // User clicked "Open Settings" — opens the requirements checklist (cli-missing state).
+    callback open-settings();
 
     background: Theme.surface;
 
@@ -47,6 +54,25 @@ export component PreflightBanner inherits Rectangle {
             }
 
             Rectangle { horizontal-stretch: 1; }
+
+            if root.app-state == "cli-missing" : VerticalLayout {
+                alignment: center;
+                spacing: Theme.gap-sm;
+                TxtButton {
+                    text: root.installing ? Strings.install-status-running : Strings.btn-install-cli;
+                    primary: true;
+                    enabled: !root.installing;
+                    clicked => {
+                        root.install-cli();
+                    }
+                }
+                TxtButton {
+                    text: Strings.banner-action-open-settings;
+                    clicked => {
+                        root.open-settings();
+                    }
+                }
+            }
 
             if root.app-state == "relogin" : VerticalLayout {
                 alignment: center;
