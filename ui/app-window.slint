@@ -146,6 +146,9 @@ export component AppWindow inherits Window {
                     alignment: center;
                     TxtButton {
                         text: Strings.btn-add-port;
+                        // Gated: a management call before the CLI is present and
+                        // signed in would fail with an "Unauthorized" error.
+                        enabled: root.app-state == "ready";
                         clicked => {
                             root.show-add-port = true;
                         }
@@ -156,6 +159,7 @@ export component AppWindow inherits Window {
                     TxtButton {
                         text: Strings.btn-refresh;
                         primary: true;
+                        enabled: root.app-state == "ready";
                         clicked => {
                             root.refresh();
                         }
@@ -210,6 +214,9 @@ export component AppWindow inherits Window {
         // ---- Group cards / empty state ----
         if root.groups.length == 0 : EmptyState {
             vertical-stretch: 1;
+            // Only offer "+ Create group" once the app is ready; otherwise the
+            // banner's Install CLI / Sign in path is the way forward.
+            can-create: root.app-state == "ready";
             create-group => {
                 root.show-create-group = true;
             }
@@ -263,7 +270,9 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 padding: Theme.pad;
                 alignment: end;
-                TxtButton {
+                // Hidden until ready: creating a group is a management call that
+                // would fail before the CLI is present and signed in.
+                if root.app-state == "ready" : TxtButton {
                     text: Strings.btn-create-group;
                     primary: true;
                     clicked => {
