@@ -56,6 +56,9 @@ export component SettingsDialog inherits Rectangle {
     in property <bool> req-installed-ok;
     in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
+    // True while the CLI install (winget) is running — disables the Install CLI
+    // button and swaps its label for "Installing…", matching the banner.
+    in property <bool> installing;
     // Requirements actions.
     callback install-cli();
     callback sign-in();
@@ -118,7 +121,8 @@ export component SettingsDialog inherits Rectangle {
                 ok: root.req-cli-ok;
                 label: Strings.req-cli;
                 if !root.req-cli-ok: TxtButton {
-                    text: Strings.btn-install-cli;
+                    text: root.installing ? Strings.install-status-running : Strings.btn-install-cli;
+                    enabled: !root.installing;
                     clicked => {
                         root.install-cli();
                     }
