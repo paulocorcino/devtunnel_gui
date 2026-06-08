@@ -71,6 +71,9 @@ jobs:
           name: ${{ github.event.inputs.tag || github.ref_name }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # SemVer pre-release tags (anything with a hyphen, e.g. v0.1.0-rc.1)
+          # are flagged so they don't replace the "Latest release" badge.
+          prerelease: ${{ contains(github.event.inputs.tag || github.ref_name, '-') }}
           files: |
             dist/*.exe
             dist/*.sha256
