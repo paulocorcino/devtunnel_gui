@@ -349,16 +349,20 @@ fn main() -> anyhow::Result<()> {
             let pf_tx = pf_tx.clone();
             std::thread::spawn(move || match devtunnel::install_cli() {
                 // Re-run preflight so the banner + requirements rows update.
-                Ok(true) => {
+                devtunnel::InstallOutcome::Installed => {
                     let _ = pf_tx.send(devtunnel::preflight());
                 }
                 // winget unavailable — open the official install page instead.
-                Ok(false) => {
+                devtunnel::InstallOutcome::WingetMissing => {
                     let _ = open::that(devtunnel::CLI_INSTALL_URL);
                 }
                 // winget ran but failed: log it and fall back to the install page
                 // so the user who clicked the button still gets somewhere to go.
-                Err(e) => {
+                devtunnel::InstallOutcome::Elevation => {
+                    log::warn!("install_cli: administrator privileges required");
+                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                }
+                devtunnel::InstallOutcome::Failed(e) => {
                     log::warn!("install_cli: {e}");
                     let _ = open::that(devtunnel::CLI_INSTALL_URL);
                 }

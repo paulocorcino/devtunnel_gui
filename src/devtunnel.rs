@@ -89,12 +89,61 @@ pub fn preflight() -> Preflight {
 pub const CLI_INSTALL_URL: &str =
     "https://learn.microsoft.com/azure/developer/dev-tunnels/get-started";
 
-/// Attempts to install the Dev Tunnels CLI via `winget`.
+/// Outcome of an attempt to install the Dev Tunnels CLI via `winget`.
 ///
-/// Returns `Ok(true)` when the install succeeded, `Ok(false)` when `winget` is
-/// not available (the caller should open [`CLI_INSTALL_URL`] instead), and `Err`
-/// when `winget` ran but reported a failure. Runs off the UI thread.
-pub fn install_cli() -> Result<bool> {
+/// Distinguishes the four cases the onboarding UI must surface differently:
+/// success, `winget` missing (fall back to the manual download page), an
+/// elevation/administrator requirement (a specific, actionable failure), and any
+/// other failure (carrying the trimmed `winget` stderr for display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// `winget` installed the CLI successfully.
+    Installed,
+    /// `winget` itself is not available — the caller should open [`CLI_INSTALL_URL`].
+    WingetMissing,
+    /// The install needs administrator/elevated privileges that the current
+    /// (non-elevated) process lacks.
+    Elevation,
+    /// `winget` ran but failed for some other reason; carries the trimmed stderr.
+    Failed(String),
+}
+
+/// Windows `ERROR_ELEVATION_REQUIRED` — the exit code a process gets when an
+/// operation needs administrator rights it does not have.
+const ELEVATION_EXIT_CODE: i32 = 740;
+
+/// Pure classifier for a finished `winget install` run: maps the success flag,
+/// process exit code, and stderr to an [`InstallOutcome`]. An elevation hint in
+/// the stderr ("elevat", "administrator", "requires admin") or the Windows
+/// elevation exit code maps to [`InstallOutcome::Elevation`]; any other non-zero
+/// result maps to [`InstallOutcome::Failed`] with the trimmed stderr; success
+/// maps to [`InstallOutcome::Installed`]. Kept pure so it is unit-testable
+/// without spawning `winget`.
+pub fn classify_install_result(
+    success: bool,
+    exit_code: Option<i32>,
+    stderr: &str,
+) -> InstallOutcome {
+    if success {
+        return InstallOutcome::Installed;
+    }
+    let lower = stderr.to_ascii_lowercase();
+    let needs_elevation = lower.contains("elevat")
+        || lower.contains("administrator")
+        || lower.contains("requires admin")
+        || exit_code == Some(ELEVATION_EXIT_CODE);
+    if needs_elevation {
+        InstallOutcome::Elevation
+    } else {
+        InstallOutcome::Failed(stderr.trim().to_string())
+    }
+}
+
+/// Attempts to install the Dev Tunnels CLI via `winget`, returning a classified
+/// [`InstallOutcome`]. A spawn error (winget not on PATH) maps to
+/// [`InstallOutcome::WingetMissing`]; a finished process is routed through
+/// [`classify_install_result`]. Runs off the UI thread.
+pub fn install_cli() -> InstallOutcome {
     let out = command("winget")
         .args([
             "install",
@@ -107,12 +156,11 @@ pub fn install_cli() -> Result<bool> {
         .output();
     match out {
         // winget not found on PATH — signal the caller to open the download page.
-        Err(_) => Ok(false),
-        Ok(o) if o.status.success() => Ok(true),
-        Ok(o) => Err(anyhow!(
-            "winget install failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
+        Err(_) => InstallOutcome::WingetMissing,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            classify_install_result(o.status.success(), o.status.code(), &stderr)
+        }
     }
 }
 
@@ -558,9 +606,41 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        anonymous_ace_args, classify_anonymous_access, classify_user_show, is_auth_error,
-        sanitize_tunnel_id, update_expiration_args,
+        anonymous_ace_args, classify_anonymous_access, classify_install_result, classify_user_show,
+        is_auth_error, sanitize_tunnel_id, update_expiration_args, InstallOutcome,
     };
+
+    #[test]
+    fn install_elevation_detected_from_stderr_or_exit_code() {
+        assert_eq!(
+            classify_install_result(false, Some(1), "Access denied: elevation required"),
+            InstallOutcome::Elevation
+        );
+        assert_eq!(
+            classify_install_result(false, Some(1), "This action requires administrator rights"),
+            InstallOutcome::Elevation
+        );
+        assert_eq!(
+            classify_install_result(false, Some(740), "permission denied"),
+            InstallOutcome::Elevation
+        );
+    }
+
+    #[test]
+    fn install_generic_failure_maps_to_failed_with_trimmed_stderr() {
+        assert_eq!(
+            classify_install_result(false, Some(1), "  no applicable package found  "),
+            InstallOutcome::Failed("no applicable package found".to_string())
+        );
+    }
+
+    #[test]
+    fn install_success_maps_to_installed() {
+        assert_eq!(
+            classify_install_result(true, Some(0), ""),
+            InstallOutcome::Installed
+        );
+    }
 
     #[test]
     fn anonymous_access_detected_on_allow_entry() {
