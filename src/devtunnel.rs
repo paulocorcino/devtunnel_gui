@@ -34,6 +34,25 @@ fn bin() -> String {
     std::env::var("DEVTUNNEL_BIN").unwrap_or_else(|_| "devtunnel".to_string())
 }
 
+/// Process creation flag that suppresses the console window Windows would
+/// otherwise flash for each subprocess.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Builds a `Command` for `program` with the console window suppressed on
+/// Windows. Every subprocess in this module must go through here: without the
+/// flag, each one-shot `devtunnel`/`winget` call flashes a black console window,
+/// which both looks broken and makes the app resemble a malware installer.
+fn command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// Result of the startup preflight: is the CLI present and logged in?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Preflight {
@@ -49,10 +68,10 @@ pub enum Preflight {
 /// `devtunnel user show -j` for login state. Never errors — the outcome is the
 /// enum, which the UI maps to a banner state.
 pub fn preflight() -> Preflight {
-    if Command::new(bin()).arg("--version").output().is_err() {
+    if command(&bin()).arg("--version").output().is_err() {
         return Preflight::CliMissing;
     }
-    match Command::new(bin()).args(["user", "show", "-j"]).output() {
+    match command(&bin()).args(["user", "show", "-j"]).output() {
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             if classify_user_show(out.status.success(), &stdout) {
@@ -76,7 +95,7 @@ pub const CLI_INSTALL_URL: &str =
 /// not available (the caller should open [`CLI_INSTALL_URL`] instead), and `Err`
 /// when `winget` ran but reported a failure. Runs off the UI thread.
 pub fn install_cli() -> Result<bool> {
-    let out = Command::new("winget")
+    let out = command("winget")
         .args([
             "install",
             "-e",
@@ -191,7 +210,7 @@ pub fn sanitize_tunnel_id(name: &str) -> String {
 /// Used for operations whose JSON payload the UI does not consume.
 fn run_ok(args: &[&str], loc: &Locale) -> Result<()> {
     let joined = args.join(" ");
-    let output = Command::new(bin()).args(args).output().with_context(|| {
+    let output = command(&bin()).args(args).output().with_context(|| {
         let mut a = FluentArgs::new();
         a.set("args", joined.clone());
         loc.t_args("err-cli-not-found", &a)
@@ -365,7 +384,7 @@ pub fn delete_port(tunnel_id: &str, port: i32, loc: &Locale) -> Result<()> {
 pub fn mint_token(full_id: &str, scope: &str, loc: &Locale) -> Result<String> {
     let args = ["token", full_id, "--scopes", scope, "-j"];
     let joined = args.join(" ");
-    let output = Command::new(bin()).args(args).output().with_context(|| {
+    let output = command(&bin()).args(args).output().with_context(|| {
         let mut a = FluentArgs::new();
         a.set("args", joined.clone());
         loc.t_args("err-cli-not-found", &a)
@@ -406,7 +425,7 @@ pub fn split_locator(full_id: &str) -> Option<(String, String)> {
 
 fn run_json<T: DeserializeOwned>(args: &[&str], loc: &Locale) -> Result<T> {
     let joined = args.join(" ");
-    let output = Command::new(bin()).args(args).output().with_context(|| {
+    let output = command(&bin()).args(args).output().with_context(|| {
         let mut a = FluentArgs::new();
         a.set("args", joined.clone());
         loc.t_args("err-cli-not-found", &a)

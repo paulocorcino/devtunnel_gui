@@ -29,12 +29,29 @@ fn devtunnel_bin() -> String {
     std::env::var("DEVTUNNEL_BIN").unwrap_or_else(|_| DEVTUNNEL.to_string())
 }
 
+/// Process creation flag that suppresses the console window Windows would
+/// otherwise flash for each subprocess.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+/// Builds a `Command` with the console window suppressed on Windows, so the
+/// subprocess never flashes a black console window.
+fn command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
 /// `devtunnel token <id> --scopes <scope> -j` → token string.
 /// Mint one scope at a time: repeating `--scopes` on the CLI corrupts the first value
 /// (becomes "shost"). Two tokens are needed: `host` (connect to relay) and
 /// `manage:ports` (SDK calls create_tunnel_port in add_port → 401 without auth).
 fn mint_token(full_id: &str, scope: &str) -> anyhow::Result<String> {
-    let out = Command::new(devtunnel_bin())
+    let out = command(&devtunnel_bin())
         .args(["token", full_id, "--scopes", scope, "-j"])
         .output()?;
     if !out.status.success() {
@@ -52,7 +69,7 @@ fn mint_token(full_id: &str, scope: &str) -> anyhow::Result<String> {
 
 /// Fetches the real Public URL (portUri) for the port via `devtunnel show <id> -j`.
 fn fetch_port_uri(full_id: &str, port: u16) -> Option<String> {
-    let out = Command::new(devtunnel_bin())
+    let out = command(&devtunnel_bin())
         .args(["show", full_id, "-j"])
         .output()
         .ok()?;
