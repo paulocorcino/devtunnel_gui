@@ -53,6 +53,8 @@ export component SettingsDialog inherits Rectangle {
     // Requirements checklist state (set from Rust each time the dialog opens).
     in property <bool> req-cli-ok;
     in property <bool> req-login-ok;
+    // Logged-in account (e.g. an email); empty when logged out or not yet fetched.
+    in property <string> req-login-account;
     in property <bool> req-installed-ok;
     in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
@@ -130,7 +132,11 @@ export component SettingsDialog inherits Rectangle {
             }
             ReqRow {
                 ok: root.req-login-ok;
-                label: Strings.req-login;
+                // "Signed in as <account>" when logged in and the account is known;
+                // plain "Signed in" otherwise.
+                label: root.req-login-ok && root.req-login-account != ""
+                    ? Strings.req-login-as + " " + root.req-login-account
+                    : Strings.req-login;
                 if !root.req-login-ok: TxtButton {
                     text: Strings.btn-sign-in;
                     clicked => {

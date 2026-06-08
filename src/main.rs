@@ -435,6 +435,16 @@ fn main() -> anyhow::Result<()> {
                 a.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
                 a.set_show_settings(true);
             }
+            // Fetch the logged-in account off the UI thread (subprocess call) and
+            // fill the "Signed in as …" label when it lands. Best-effort: an empty
+            // result leaves the row showing the plain "Signed in" label.
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let account = devtunnel::current_username().unwrap_or_default();
+                let _ = weak.upgrade_in_event_loop(move |a| {
+                    a.set_req_login_account(account.into());
+                });
+            });
         });
     }
     // ---- Settings: uninstall (remove shortcut + auto-start, then self-delete) ----
@@ -1368,10 +1378,6 @@ fn apply_rows(
 
     match result {
         Ok(rows) => {
-            // Count real ports only: a portless group is carried as a `port == 0`
-            // row, which must not inflate the header's port tally.
-            let count = rows.iter().filter(|r| r.port != 0).count();
-
             // Build the group picker (deduped by Real Tunnel ID, order preserved);
             // append the "+ New group…" entry last with an empty id.
             let mut group_names: Vec<SharedString> = Vec::new();
@@ -1393,7 +1399,10 @@ fn apply_rows(
             // Also persist the rows so the next startup paints immediately.
             state::save_row_cache(&rows);
             state.borrow_mut().rows = rows;
-            rebuild_rows(&app, tray, actions, state, loc);
+            // The header chip counts the ports actually rendered into the cards
+            // (returned by rebuild_rows), not raw `rows`: an optimistically-hidden
+            // or stale port must not inflate the chip while its card shows portless.
+            let count = rebuild_rows(&app, tray, actions, state, loc);
 
             let mut args = FluentArgs::new();
             args.set("count", count as i64);
@@ -1423,14 +1432,22 @@ fn apply_rows(
 /// `status` and each group's `hosting` flag derive from the latest probe/host
 /// events. Runs on the UI thread (after a load, or when a host/probe event
 /// updates derived state).
+///
+/// Returns the number of real service ports actually rendered into the cards
+/// (excludes portless groups, optimistically-hidden ports, and provisioning
+/// placeholders). The header chip is set from this so it can never disagree with
+/// what the cards show — counting raw `rows` instead let a hidden/stale port
+/// inflate the chip while the card showed the group as portless.
 fn rebuild_rows(
     app: &AppWindow,
     tray: &tray_icon::TrayIcon,
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
     state: &Rc<RefCell<LiveState>>,
     loc: &Rc<Locale>,
-) {
+) -> usize {
     let st = state.borrow();
+    // Count of real service ports rendered into the cards; returned for the header.
+    let mut rendered_ports = 0usize;
     // Build a flat index space first: every visible (non-hidden) real port gets a
     // stable `row-index` used to key the expandable detail panel (issue #17). The
     // same index drives `selected-index` so the open panel survives reloads.
@@ -1477,6 +1494,7 @@ fn rebuild_rows(
         // drops the port row until the reflush refresh confirms the deletion.
         if r.port != 0 && !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port))) {
             groups[gi].has_port = true;
+            rendered_ports += 1;
             ports[gi].push(PortView {
                 port: r.port,
                 protocol: r.protocol.clone().into(),
@@ -1562,6 +1580,7 @@ fn rebuild_rows(
     if stale_detail {
         state.borrow_mut().detail = None;
     }
+    rendered_ports
 }
 
 /// Fires a `fetch_port_status` for the selected port on a background thread;
@@ -1770,6 +1789,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_req_title(loc.t("req-title").into());
     s.set_req_cli(loc.t("req-cli").into());
     s.set_req_login(loc.t("req-login").into());
+    s.set_req_login_as(loc.t("req-login-as").into());
     s.set_req_installed(loc.t("req-installed").into());
     s.set_req_shortcut(loc.t("req-shortcut").into());
     s.set_req_autostart(loc.t("req-autostart").into());

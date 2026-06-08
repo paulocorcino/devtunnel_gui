@@ -82,6 +82,7 @@ badge-hosted-external = Hosted elsewhere
 req-title = Requirements
 req-cli = Dev Tunnels CLI installed
 req-login = Signed in
+req-login-as = Signed in as
 req-installed = Installed in your programs folder
 req-shortcut = Start-menu shortcut created
 req-autostart = Starts with Windows

@@ -74,6 +74,9 @@ export component AppWindow inherits Window {
     // by Rust when the dialog opens and after install/auto-start actions.
     in property <bool> req-cli-ok;
     in property <bool> req-login-ok;
+    // Logged-in account (e.g. an email), shown next to the "Signed in" row.
+    // Empty when logged out or not yet fetched.
+    in property <string> req-login-account;
     in property <bool> req-installed-ok;
     in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
@@ -337,6 +340,7 @@ export component AppWindow inherits Window {
         app-version: root.app-version;
         req-cli-ok: root.req-cli-ok;
         req-login-ok: root.req-login-ok;
+        req-login-account: root.req-login-account;
         req-installed-ok: root.req-installed-ok;
         req-shortcut-ok: root.req-shortcut-ok;
         req-autostart-ok: root.req-autostart-ok;

@@ -92,6 +92,28 @@ pub fn preflight() -> Preflight {
     }
 }
 
+/// Returns the logged-in account identifier from `devtunnel user show -j`
+/// (the `username` field, e.g. an email), or `None` when logged out or the
+/// command/parse fails. Best-effort and read-only; safe to call off the UI
+/// thread to populate the Settings "Signed in as …" label.
+pub fn current_username() -> Option<String> {
+    let out = command(&bin())
+        .args(["user", "show", "-j"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let start = stdout.find(['{', '['])?;
+    let value: serde_json::Value = serde_json::from_str(stdout[start..].trim()).ok()?;
+    value
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
 /// Official Dev Tunnels CLI install page — opened as a fallback when `winget`
 /// itself is unavailable, so the user can install the CLI manually.
 pub const CLI_INSTALL_URL: &str =
