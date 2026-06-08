@@ -39,16 +39,39 @@ fn bin() -> String {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Process creation flag that gives an interactive subprocess its own visible
+/// console window (and lets it inherit stdio). Used only for commands that
+/// prompt the user — notably `user login`, which must NOT be hidden.
+#[cfg(windows)]
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
 /// Builds a `Command` for `program` with the console window suppressed on
-/// Windows. Every subprocess in this module must go through here: without the
-/// flag, each one-shot `devtunnel`/`winget` call flashes a black console window,
-/// which both looks broken and makes the app resemble a malware installer.
+/// Windows. Every *silent* subprocess in this module must go through here:
+/// without the flag, each one-shot `devtunnel`/`winget` call flashes a black
+/// console window, which both looks broken and makes the app resemble a malware
+/// installer. Interactive commands must use [`interactive_command`] instead.
 fn command(program: &str) -> Command {
     let mut cmd = Command::new(program);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+    cmd
+}
+
+/// Builds a `Command` for an *interactive* `devtunnel` invocation. Unlike
+/// [`command`], it gives the process its own visible console (`CREATE_NEW_CONSOLE`)
+/// and leaves stdio inherited, so the user can see and complete a browser /
+/// device-code login. Routing `user login` through the silent [`command`] path
+/// (hidden window, captured stdio) is what leaves the app frozen on
+/// "signing in…" with no way to authenticate.
+fn interactive_command(program: &str) -> Command {
+    let mut cmd = Command::new(program);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
     }
     cmd
 }
@@ -150,11 +173,27 @@ pub fn is_auth_error(stderr: &str) -> bool {
     lower.contains("token") && (lower.contains("invalid") || lower.contains("revoked"))
 }
 
-/// Runs `devtunnel user login` (interactive — opens the system browser) and
-/// waits for it to finish. The caller re-runs [`preflight`] afterwards to
-/// confirm the login took effect.
+/// Runs `devtunnel user login` (interactive — opens the system browser and may
+/// show a device code) in its own visible console and waits for it to finish.
+/// Goes through [`interactive_command`] with inherited stdio — never the silent
+/// [`command`] path, which would hide the auth prompt. The caller re-runs
+/// [`preflight`] afterwards to confirm the login took effect.
 pub fn user_login(loc: &Locale) -> Result<()> {
-    run_ok(&["user", "login"], loc)
+    let status = interactive_command(&bin())
+        .args(["user", "login"])
+        .status()
+        .with_context(|| {
+            let mut a = FluentArgs::new();
+            a.set("args", "user login".to_string());
+            loc.t_args("err-cli-not-found", &a)
+        })?;
+
+    if !status.success() {
+        // stdio is inherited (shown in the console), so there is no captured
+        // stderr to surface — report a generic login failure.
+        return Err(anyhow!("{}", loc.t("err-login-failed")));
+    }
+    Ok(())
 }
 
 /// Options for creating a group (tunnel). Mirrors the minimal + advanced fields
