@@ -109,7 +109,10 @@ pub enum InstallOutcome {
 }
 
 /// Windows `ERROR_ELEVATION_REQUIRED` — the exit code a process gets when an
-/// operation needs administrator rights it does not have.
+/// operation needs administrator rights it does not have. Best-effort: `winget`
+/// usually surfaces its own HRESULT-style codes instead, so in practice the
+/// stderr substring heuristics below are what catch the elevation case; this
+/// constant is a cheap extra signal, not the primary detector.
 const ELEVATION_EXIT_CODE: i32 = 740;
 
 /// Pure classifier for a finished `winget install` run: maps the success flag,
