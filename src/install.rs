@@ -192,7 +192,8 @@ mod tests {
     fn path_prefix_rejects_sibling_with_extended_name() {
         // A sibling dir whose name merely starts with the install dir name must
         // not count as "installed" (regression: missing dir-boundary check).
-        let exe = Path::new(r"C:\Users\Me\AppData\Local\Programs\DevTunnelGUI-old\devtunnel_gui.exe");
+        let exe =
+            Path::new(r"C:\Users\Me\AppData\Local\Programs\DevTunnelGUI-old\devtunnel_gui.exe");
         let dir = Path::new(r"C:\Users\Me\AppData\Local\Programs\DevTunnelGUI");
         assert!(!path_starts_with(exe, dir));
     }

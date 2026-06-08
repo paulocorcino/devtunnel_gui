@@ -199,7 +199,10 @@ fn main() -> anyhow::Result<()> {
                             install::cleanup_relocated(std::path::Path::new(&old));
                         });
                     }
-                    None => log::warn!("install: {} given with no path", install::RELOCATED_FROM_FLAG),
+                    None => log::warn!(
+                        "install: {} given with no path",
+                        install::RELOCATED_FROM_FLAG
+                    ),
                 }
             }
         }
@@ -1134,11 +1137,25 @@ fn perform_uninstall() {
         log::warn!("uninstall: failed to remove shortcut: {e}");
     }
     // Remove persisted settings + row cache (%APPDATA%\devtunnel-gui).
+    // Guard against state_dir()'s "." fallback when APPDATA is unset: deleting a
+    // relative CWD recursively would be catastrophic (e.g. wiping the folder the
+    // portable exe was launched from). Only ever remove an absolute, APPDATA-based
+    // path; skip otherwise.
     let dir = state::state_dir();
-    if let Err(e) = std::fs::remove_dir_all(&dir) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            log::warn!("uninstall: failed to remove state dir {}: {e}", dir.display());
+    if dir.is_absolute() {
+        if let Err(e) = std::fs::remove_dir_all(&dir) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                log::warn!(
+                    "uninstall: failed to remove state dir {}: {e}",
+                    dir.display()
+                );
+            }
         }
+    } else {
+        log::warn!(
+            "uninstall: skipping state dir removal; resolved to non-absolute path {}",
+            dir.display()
+        );
     }
     if let Err(e) = install::spawn_self_delete() {
         log::warn!("uninstall: failed to schedule self-delete: {e}");
