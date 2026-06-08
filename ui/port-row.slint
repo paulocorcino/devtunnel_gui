@@ -37,7 +37,11 @@ export component PortRow inherits Rectangle {
 
     // A real, configured port (not a provisioning placeholder) can expand its
     // metrics/logs detail panel.
-    property <bool> expandable: pv.row-index >= 0 && pv.status != "provisioning";
+    // DISABLED for stability (v0.1.0): the metrics/logs panel is turned off (its
+    // polling stalled the host under traffic), so rows are not expandable. Restore
+    // the line below when metrics/logs return.
+    // property <bool> expandable: pv.row-index >= 0 && pv.status != "provisioning";
+    property <bool> expandable: false;
 
     // Reveal the row actions while the row OR any action button is hovered.
     // Including the buttons' own hover prevents the flicker that a bare
@@ -88,22 +92,36 @@ export component PortRow inherits Rectangle {
             Pill { text: pv.protocol == "" ? "—" : pv.protocol; }
         }
 
-        // The URL is the product: prominent, monospace, click-to-copy.
-        url-area := TouchArea {
-            enabled: pv.url != "";
-            mouse-cursor: pv.url == "" ? MouseCursor.default : MouseCursor.pointer;
+        // The URL is the product: prominent, monospace, click-to-copy. Only the
+        // text itself copies on click; the trailing strip toggles the detail
+        // panel so metrics/logs stay reachable even when the URL is long.
+        HorizontalLayout {
             horizontal-stretch: 1;
-            clicked => {
-                root.copy-url(pv.url);
+            url-area := TouchArea {
+                enabled: pv.url != "";
+                mouse-cursor: pv.url == "" ? MouseCursor.default : MouseCursor.pointer;
+                clicked => {
+                    root.copy-url(pv.url);
+                }
+                Text {
+                    text: pv.url == "" ? Strings.no-url : pv.url;
+                    color: pv.url == "" ? Theme.muted : (url-area.has-hover ? Theme.accent : Theme.text);
+                    font-size: Theme.fs-body;
+                    font-family: Theme.mono;
+                    overflow: elide;
+                    vertical-alignment: center;
+                }
             }
-            Text {
-                width: 100%;
-                text: pv.url == "" ? Strings.no-url : pv.url;
-                color: pv.url == "" ? Theme.muted : (url-area.has-hover ? Theme.accent : Theme.text);
-                font-size: Theme.fs-body;
-                font-family: Theme.mono;
-                overflow: elide;
-                vertical-alignment: center;
+            // Clickable gap after the URL: opens/closes the detail panel.
+            toggle-strip := TouchArea {
+                horizontal-stretch: 1;
+                min-width: Theme.toggle-width;
+                mouse-cursor: root.expandable ? MouseCursor.pointer : MouseCursor.default;
+                clicked => {
+                    if (root.expandable) {
+                        root.toggle-detail(pv.row-index, pv.port);
+                    }
+                }
             }
         }
 

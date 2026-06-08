@@ -10,6 +10,7 @@ mod icon_render;
 mod install;
 mod locale;
 mod logbuf;
+mod metrics_store;
 mod model;
 #[cfg(feature = "hosting")]
 mod probe;
@@ -84,6 +85,12 @@ struct LiveState {
     /// Port whose detail panel is expanded, keyed by (tunnel_id, port).
     /// `None` = collapsed; the metrics poll is a no-op while collapsed.
     detail: Option<(String, i32)>,
+    /// True while a `devtunnel show -j` metrics fetch is in flight. Guards the
+    /// poll timer from spawning overlapping subprocesses (the CLI is a .NET tool
+    /// and slow to start, so unguarded ticks piled up under any latency). Dormant
+    /// in v0.1.0 — the poll timer that reads it is disabled for stability.
+    #[allow(dead_code)]
+    metrics_inflight: bool,
     /// Optimistic hidden-delete keys for in-flight delete operations.
     /// `(tunnel_id, None)` hides the whole group; `(tunnel_id, Some(port))` hides one port.
     hidden: HashSet<(String, Option<i32>)>,
@@ -187,34 +194,13 @@ fn derive_host_state(state: &LiveState, tunnel_id: &str, host_connections: i64) 
 
 fn main() -> anyhow::Result<()> {
     // Install the capturing logger in every build: it tees records to stderr
-    // (what env_logger used to print in the hosting build) and into the ring
-    // buffer behind the Logs tab. Default to debug for our crate + info for the
-    // tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=trace`).
-    let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=debug,tunnels=info").install();
-
-    // Relocation handshake: when launched by a just-installed copy with
-    // `--relocated-from <path>`, delete the portable original we were moved from.
-    // Runs on a detached thread because the delete retries for up to ~3 s while
-    // the previous process exits and releases the file lock — never block startup.
-    #[cfg(windows)]
-    {
-        let mut args = std::env::args().skip(1);
-        while let Some(a) = args.next() {
-            if a == install::RELOCATED_FROM_FLAG {
-                match args.next() {
-                    Some(old) => {
-                        std::thread::spawn(move || {
-                            install::cleanup_relocated(std::path::Path::new(&old));
-                        });
-                    }
-                    None => log::warn!(
-                        "install: {} given with no path",
-                        install::RELOCATED_FROM_FLAG
-                    ),
-                }
-            }
-        }
-    }
+    // (what env_logger used to print in the hosting build).
+    // Stability (v0.1.0): the tunnels SDK logs per-connection events at info on
+    // the relay's own threads; routing that volume through a synchronous logger
+    // stalled the host under traffic. Default the SDK to `warn` (only real
+    // problems) and our crate to `info`. Override with RUST_LOG when debugging
+    // (e.g. `RUST_LOG=devtunnel_gui=debug,tunnels=info`).
+    let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=info,tunnels=warn").install();
 
     // winit registers the window class with a null icon, so the title bar and
     // taskbar would show the generic default. Install the winit backend with a
@@ -370,6 +356,7 @@ fn main() -> anyhow::Result<()> {
         let st = app_state.borrow();
         app.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
         app.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
+        app.set_log_level(st.settings.log_level.clone().into());
     }
 
     // ---- Dark mode (persisted; falls back to the Windows app theme) ----
@@ -416,6 +403,22 @@ fn main() -> anyhow::Result<()> {
         });
     }
     {
+        // Persist the chosen Logs-tab severity and re-apply it to the open panel
+        // immediately so the filter takes effect without reopening the detail.
+        let app_state = app_state.clone();
+        let weak = app.as_weak();
+        app.on_log_level_changed(move |level| {
+            {
+                let mut st = app_state.borrow_mut();
+                st.settings.log_level = level.to_string();
+                st.save();
+            }
+            if let Some(a) = weak.upgrade() {
+                refresh_logs(&a, &app_state);
+            }
+        });
+    }
+    {
         // Re-sync the toggle from the registry each time the Settings dialog
         // opens, in case the Run entry changed out of band, then show it.
         let weak = app.as_weak();
@@ -433,6 +436,7 @@ fn main() -> anyhow::Result<()> {
                 let st = app_state.borrow();
                 a.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
                 a.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
+                a.set_log_level(st.settings.log_level.clone().into());
                 a.set_show_settings(true);
             }
             // Fetch the logged-in account off the UI thread (subprocess call) and
@@ -750,6 +754,7 @@ fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let loc = loc.clone();
         let metrics_tx = metrics_tx.clone();
+        let app_state = app_state.clone();
         app.on_toggle_detail(move |index, tunnel_id, port| {
             let tid = tunnel_id.to_string();
             let mut st = state.borrow_mut();
@@ -760,44 +765,60 @@ fn main() -> anyhow::Result<()> {
             if same {
                 // Collapse: clear the selection; the poll timer goes idle.
                 st.detail = None;
+                st.metrics_inflight = false;
                 drop(st);
                 if let Some(a) = weak.upgrade() {
                     a.set_selected_index(-1);
                 }
             } else {
                 st.detail = Some((tid.clone(), port));
+                // One fetch starts now; the guard blocks the timer from piling on.
+                st.metrics_inflight = true;
                 drop(st);
                 if let Some(a) = weak.upgrade() {
                     a.set_selected_index(index);
                     // Show "n/a" until the first poll lands; logs straight away.
                     apply_metrics(&a, None, &loc);
-                    refresh_logs(&a);
+                    refresh_logs(&a, &app_state);
                 }
                 spawn_metrics_fetch(&metrics_tx, tid, port);
             }
         });
     }
 
-    // ---- Port detail polling: refresh metrics + logs while a panel is open ----
-    // A no-op while collapsed (detail == None), so no CLI calls are wasted.
-    let detail_timer = slint::Timer::default();
-    {
-        let weak = app.as_weak();
-        let state = state.clone();
-        let metrics_tx = metrics_tx.clone();
-        detail_timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_secs(3),
-            move || {
-                let selected = state.borrow().detail.clone();
-                let Some((tid, port)) = selected else { return };
-                spawn_metrics_fetch(&metrics_tx, tid, port);
-                if let Some(a) = weak.upgrade() {
-                    refresh_logs(&a);
-                }
-            },
-        );
-    }
+    // ---- Port detail polling: DISABLED for stability (v0.1.0) ----
+    // The periodic metrics fetch spawned a `devtunnel show -j` subprocess and the
+    // log refresh snapshotted the ring on every tick. Both are turned off while we
+    // focus on host stability; the detail panel itself is disabled in the UI
+    // (PortRow.expandable = false) so nothing here ever runs. Re-enable together
+    // with the panel when metrics/logs return (see docs/backlogs/metrics-chart).
+    //
+    // let detail_timer = slint::Timer::default();
+    // {
+    //     let weak = app.as_weak();
+    //     let state = state.clone();
+    //     let metrics_tx = metrics_tx.clone();
+    //     let app_state = app_state.clone();
+    //     detail_timer.start(
+    //         slint::TimerMode::Repeated,
+    //         Duration::from_secs(5),
+    //         move || {
+    //             let selected = state.borrow().detail.clone();
+    //             let Some((tid, port)) = selected else { return };
+    //             let Some(a) = weak.upgrade() else { return };
+    //             // Logs are free to refresh; do it regardless of the active tab.
+    //             refresh_logs(&a, &app_state);
+    //             // Only poll metrics on the Metrics tab (0), and only if the last
+    //             // fetch already returned.
+    //             let on_metrics_tab = a.get_detail_active_tab() == 0;
+    //             let busy = state.borrow().metrics_inflight;
+    //             if on_metrics_tab && !busy {
+    //                 state.borrow_mut().metrics_inflight = true;
+    //                 spawn_metrics_fetch(&metrics_tx, tid, port);
+    //             }
+    //         },
+    //     );
+    // }
 
     // ---- Pump events (tray + load results) into the Slint loop via Timer ----
     let menu_rx = MenuEvent::receiver();
@@ -916,6 +937,8 @@ fn main() -> anyhow::Result<()> {
 
                 // Selected-port metrics -> detail panel (skip stale selections).
                 while let Ok((tid, port, result)) = metrics_rx.try_recv() {
+                    // This fetch is done — let the timer schedule the next one.
+                    state.borrow_mut().metrics_inflight = false;
                     let current = state
                         .borrow()
                         .detail
@@ -924,6 +947,16 @@ fn main() -> anyhow::Result<()> {
                     if !current {
                         continue;
                     }
+                    // Metrics sample persistence DISABLED for stability (v0.1.0):
+                    // no metrics are fetched while the detail panel is off, so
+                    // nothing arrives here. Re-enable with the detail polling.
+                    // if let Ok(m) = &result {
+                    //     if let Ok(now) = std::time::SystemTime::now()
+                    //         .duration_since(std::time::UNIX_EPOCH)
+                    //     {
+                    //         metrics_store::append(&tid, port, m, now.as_secs());
+                    //     }
+                    // }
                     if let Some(a) = weak.upgrade() {
                         // Errors (port deleted, CLI hiccup) degrade to "n/a".
                         apply_metrics(&a, result.ok().as_ref(), &loc);
@@ -1162,12 +1195,10 @@ fn enable_auto_start(app_state: &Rc<RefCell<state::AppState>>) {
         st.settings.auto_start = true;
         st.save();
     }
-    if let Ok(old) = std::env::current_exe() {
-        if install::relaunch_from(&new_exe, &old).is_ok() {
-            std::process::exit(0);
-        }
-        log::warn!("install: relaunch from new location failed; staying in place");
+    if install::relaunch_installed(&new_exe).is_ok() {
+        std::process::exit(0);
     }
+    log::warn!("install: relaunch from new location failed; staying in place");
 }
 
 /// Uninstalls the app: removes the Start-menu shortcut, disables start-with-
@@ -1644,9 +1675,11 @@ fn apply_metrics(app: &AppWindow, metrics: Option<&devtunnel::PortMetrics>, loc:
     app.set_detail_connections(count(metrics.and_then(|m| m.connection_count)));
 }
 
-/// Refreshes the Logs tab model from the capture ring buffer (oldest first).
-fn refresh_logs(app: &AppWindow) {
-    let lines: Vec<SharedString> = logbuf::snapshot()
+/// Refreshes the Logs tab model from the capture ring buffer (oldest first),
+/// filtered to the user-chosen minimum severity from Settings.
+fn refresh_logs(app: &AppWindow, app_state: &Rc<RefCell<state::AppState>>) {
+    let level = state::parse_log_level(&app_state.borrow().settings.log_level);
+    let lines: Vec<SharedString> = logbuf::snapshot(level)
         .into_iter()
         .map(SharedString::from)
         .collect();
@@ -1785,6 +1818,11 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
 
+    // Dialog — inline validation messages
+    s.set_err_field_name_required(loc.t("err-field-name-required").into());
+    s.set_err_field_port_required(loc.t("err-field-port-required").into());
+    s.set_err_field_port_range(loc.t("err-field-port-range").into());
+
     // Settings — requirements checklist
     s.set_req_title(loc.t("req-title").into());
     s.set_req_cli(loc.t("req-cli").into());
@@ -1798,9 +1836,17 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
 
     // Settings
     s.set_settings_title(loc.t("settings-title").into());
+    s.set_settings_section_general(loc.t("settings-section-general").into());
+    s.set_settings_section_status(loc.t("settings-section-status").into());
+    s.set_settings_section_about(loc.t("settings-section-about").into());
     s.set_field_auto_start(loc.t("field-auto-start").into());
     s.set_field_probe_interval(loc.t("field-probe-interval").into());
     s.set_field_default_expiration(loc.t("field-default-expiration").into());
+    s.set_field_log_level(loc.t("field-log-level").into());
+    s.set_log_level_error(loc.t("log-level-error").into());
+    s.set_log_level_warn(loc.t("log-level-warn").into());
+    s.set_log_level_info(loc.t("log-level-info").into());
+    s.set_log_level_debug(loc.t("log-level-debug").into());
     s.set_btn_close(loc.t("btn-close").into());
     s.set_btn_uninstall(loc.t("btn-uninstall").into());
     s.set_confirm_uninstall(loc.t("confirm-uninstall").into());

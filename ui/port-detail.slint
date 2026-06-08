@@ -155,6 +155,12 @@ export component PortDetailPanel inherits Rectangle {
                 vertical-alignment: center;
             }
             if root.log-lines.length > 0 : ListView {
+                // Stick to the newest line: whenever the log set updates, pin the
+                // viewport to the bottom so the latest record stays visible.
+                property <int> line-count: root.log-lines.length;
+                changed line-count => {
+                    self.viewport-y = Math.min(0px, self.visible-height - self.viewport-height);
+                }
                 for line in root.log-lines : Text {
                     text: line;
                     color: Theme.text;

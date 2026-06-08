@@ -50,6 +50,10 @@ export component AppWindow inherits Window {
     in property <string> detail-connections: Strings.metric-na;
     // Most recent captured log lines (oldest first).
     in property <[string]> detail-logs;
+    // Active detail tab (0 = Metrics, 1 = Logs). Held here so it persists across
+    // row-model rebuilds — the panel lives in an `if` that is recreated on each
+    // poll, which would otherwise snap the tab back to Metrics.
+    in-out property <int> detail-active-tab: 0;
 
     // App-level preflight state: "ready" | "cli-missing" | "relogin".
     // Non-ready states show the PreflightBanner above the list. The "relogin"
@@ -67,6 +71,9 @@ export component AppWindow inherits Window {
     // Default expiration for new groups, in whole days (max 30). The CLI "d"
     // suffix is added in Rust; the UI only ever deals in days.
     in-out property <int> default-expiration-days: 30;
+    // Minimum severity shown in the Logs tab ("error"/"warn"/"info"/"debug");
+    // seeded from settings by Rust, edited via the Settings dialog.
+    in-out property <string> log-level: "info";
     // App version string (from Cargo), shown in the About panel.
     in property <string> app-version;
 
@@ -92,6 +99,8 @@ export component AppWindow inherits Window {
     // The user edited the probe interval / default expiration in the settings dialog.
     callback probe-interval-changed(int);
     callback default-expiration-changed(int /*days*/);
+    // The user changed the Logs-tab minimum severity in the settings dialog.
+    callback log-level-changed(string);
     // The user toggled dark mode via the top-bar affordance (persist the choice).
     callback theme-changed(bool /*dark*/);
     // The user clicked "Sign in" in the re-login banner.
@@ -242,6 +251,7 @@ export component AppWindow inherits Window {
                     detail-download-rate: root.detail-download-rate;
                     detail-connections: root.detail-connections;
                     detail-logs: root.detail-logs;
+                    detail-active-tab <=> root.detail-active-tab;
                     host => {
                         root.host(g.tunnel-id);
                     }
@@ -336,6 +346,10 @@ export component AppWindow inherits Window {
         default-expiration-days <=> root.default-expiration-days;
         default-expiration-changed(days) => {
             root.default-expiration-changed(days);
+        }
+        log-level <=> root.log-level;
+        log-level-changed(level) => {
+            root.log-level-changed(level);
         }
         app-version: root.app-version;
         req-cli-ok: root.req-cli-ok;

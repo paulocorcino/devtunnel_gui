@@ -67,3 +67,11 @@ slint-build = "1.13"
 [target.'cfg(windows)'.build-dependencies]
 ico = "0.3"
 winresource = "0.1"
+
+# Profiling build: release-grade optimization with full debug symbols so a
+# sampler (samply) shows readable stacks and blocked-thread info. Build with:
+#   cargo build --features hosting --profile profiling
+# then:  samply record -- target/profiling/devtunnel_gui.exe
+[profile.profiling]
+inherits = "release"
+debug = true

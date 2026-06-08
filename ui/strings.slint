@@ -65,6 +65,11 @@ export global Strings {
     in property <string> new-group-option: "+ New group…";
     in property <string> ph-port: "e.g. 3000";
 
+    // Dialog — inline validation messages
+    in property <string> err-field-name-required: "Name is required.";
+    in property <string> err-field-port-required: "Port number is required.";
+    in property <string> err-field-port-range: "Port must be between 1 and 65535.";
+
     // Status-dot tooltip labels (health states reuse the badge-* strings)
     in property <string> badge-stopped: "Stopped";
     in property <string> badge-hosting: "Hosting…";
@@ -110,9 +115,17 @@ export global Strings {
 
     // Settings
     in property <string> settings-title: "Settings";
+    in property <string> settings-section-general: "General";
+    in property <string> settings-section-status: "Status";
+    in property <string> settings-section-about: "About";
     in property <string> field-auto-start: "Start with Windows";
     in property <string> field-probe-interval: "Probe interval (seconds)";
     in property <string> field-default-expiration: "Default expiration";
+    in property <string> field-log-level: "Log level";
+    in property <string> log-level-error: "Error";
+    in property <string> log-level-warn: "Warning";
+    in property <string> log-level-info: "Info";
+    in property <string> log-level-debug: "Debug";
     in property <string> btn-close: "Close";
     in property <string> btn-uninstall: "Uninstall";
     in property <string> confirm-uninstall: "Uninstall DevTunnel GUI? This removes the Start-menu shortcut, turns off start-with-Windows, deletes your saved settings, and removes the app from your programs folder.";

@@ -5,52 +5,81 @@
 //! console behavior) and into a fixed-capacity ring buffer that the UI
 //! snapshots when the port detail panel's Logs tab refreshes.
 
-use log::{LevelFilter, Log, Metadata, Record};
+use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
 /// Maximum number of captured lines kept in memory.
 const CAPACITY: usize = 500;
 
-/// A bounded FIFO of formatted log lines. Kept as a plain struct (capacity is
+/// One captured record: its severity (for the Logs-tab level filter) plus the
+/// pre-formatted display line.
+#[derive(Clone)]
+struct Entry {
+    level: Level,
+    line: String,
+}
+
+/// A bounded FIFO of captured log entries. Kept as a plain struct (capacity is
 /// a field, not the global constant) so the eviction logic is unit-testable.
 struct Ring {
-    lines: VecDeque<String>,
+    entries: VecDeque<Entry>,
     capacity: usize,
 }
 
 impl Ring {
     const fn new(capacity: usize) -> Self {
         Ring {
-            lines: VecDeque::new(),
+            entries: VecDeque::new(),
             capacity,
         }
     }
 
-    /// Appends a line, evicting the oldest when full.
-    fn push(&mut self, line: String) {
-        if self.lines.len() == self.capacity {
-            self.lines.pop_front();
+    /// Appends an entry, evicting the oldest when full.
+    fn push(&mut self, entry: Entry) {
+        if self.entries.len() == self.capacity {
+            self.entries.pop_front();
         }
-        self.lines.push_back(line);
+        self.entries.push_back(entry);
     }
 
-    /// Returns the captured lines, oldest first.
-    fn snapshot(&self) -> Vec<String> {
-        self.lines.iter().cloned().collect()
+    /// Returns the lines at or above `min` severity, oldest first. A record is
+    /// kept when its level is at least as severe as the filter — the same
+    /// "enabled" comparison `log` uses (`Error <= Warn <= Info <= …`).
+    fn snapshot(&self, min: LevelFilter) -> Vec<String> {
+        self.entries
+            .iter()
+            .filter(|e| e.level <= min)
+            .map(|e| e.line.clone())
+            .collect()
     }
 }
 
 static RING: Mutex<Ring> = Mutex::new(Ring::new(CAPACITY));
 
-/// Appends a line to the process-wide ring buffer.
-pub fn push(line: String) {
-    RING.lock().unwrap_or_else(|e| e.into_inner()).push(line);
+/// Appends a record to the process-wide ring buffer.
+/// Dormant in v0.1.0 (Logs-tab capture disabled); kept for re-enable + tests.
+#[allow(dead_code)]
+pub fn push(level: Level, line: String) {
+    RING.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push(Entry { level, line });
 }
 
-/// Snapshots the process-wide ring buffer, oldest line first.
-pub fn snapshot() -> Vec<String> {
-    RING.lock().unwrap_or_else(|e| e.into_inner()).snapshot()
+/// Snapshots the process-wide ring buffer (lines at or above `min` severity,
+/// oldest first). The Logs tab passes the user-chosen level from Settings.
+pub fn snapshot(min: LevelFilter) -> Vec<String> {
+    RING.lock().unwrap_or_else(|e| e.into_inner()).snapshot(min)
+}
+
+/// Relay/SSH chatter that is pure noise in the Logs tab — one line per client
+/// connection ("Opened new client on channel N"). Hidden at capture time so it
+/// never reaches the ring; matched on the formatted message text. Add further
+/// noise phrases here as they surface.
+/// Dormant in v0.1.0 (Logs-tab capture disabled); kept for re-enable + tests.
+#[allow(dead_code)]
+fn is_noise(message: &str) -> bool {
+    message.contains("Opened new client on channel")
 }
 
 /// Global logger that filters like `env_logger` (longest-prefix `target=level`
@@ -134,15 +163,16 @@ impl Log for CaptureLogger {
         if !self.enabled(record.metadata()) {
             return;
         }
+        let message = record.args().to_string();
         // Technical/diagnostic content — intentionally not localized.
-        let line = format!(
-            "{:<5} {} — {}",
-            record.level(),
-            record.target(),
-            record.args()
-        );
+        let line = format!("{:<5} {} — {}", record.level(), record.target(), message);
         eprintln!("{line}");
-        push(line);
+        // Logs-tab capture DISABLED for stability (v0.1.0): the detail panel's
+        // Logs view is turned off, so records are no longer accumulated in the
+        // ring (only stderr above is kept). Restore with the panel.
+        // if !is_noise(&message) {
+        //     push(record.level(), line);
+        // }
     }
 
     fn flush(&self) {}
@@ -152,27 +182,62 @@ impl Log for CaptureLogger {
 mod tests {
     use super::*;
 
+    fn entry(level: Level, line: &str) -> Entry {
+        Entry {
+            level,
+            line: line.to_string(),
+        }
+    }
+
     #[test]
     fn ring_evicts_oldest_when_full() {
         let mut ring = Ring::new(3);
         for i in 0..5 {
-            ring.push(format!("line {i}"));
+            ring.push(entry(Level::Info, &format!("line {i}")));
         }
-        assert_eq!(ring.snapshot(), vec!["line 2", "line 3", "line 4"]);
+        assert_eq!(
+            ring.snapshot(LevelFilter::Trace),
+            vec!["line 2", "line 3", "line 4"]
+        );
     }
 
     #[test]
     fn ring_snapshot_preserves_insertion_order() {
         let mut ring = Ring::new(10);
-        ring.push("a".into());
-        ring.push("b".into());
-        assert_eq!(ring.snapshot(), vec!["a", "b"]);
+        ring.push(entry(Level::Info, "a"));
+        ring.push(entry(Level::Info, "b"));
+        assert_eq!(ring.snapshot(LevelFilter::Info), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn snapshot_filters_below_min_severity() {
+        let mut ring = Ring::new(10);
+        ring.push(entry(Level::Error, "err"));
+        ring.push(entry(Level::Info, "info"));
+        ring.push(entry(Level::Debug, "dbg"));
+        // Info filter keeps Error+Info, hides Debug.
+        assert_eq!(ring.snapshot(LevelFilter::Info), vec!["err", "info"]);
+        // Error filter keeps only Error.
+        assert_eq!(ring.snapshot(LevelFilter::Error), vec!["err"]);
+        // Debug filter keeps everything.
+        assert_eq!(
+            ring.snapshot(LevelFilter::Debug),
+            vec!["err", "info", "dbg"]
+        );
+    }
+
+    #[test]
+    fn channel_open_chatter_is_noise() {
+        assert!(is_noise("Opened new client on channel 7"));
+        assert!(!is_noise("relay connected"));
     }
 
     #[test]
     fn global_push_and_snapshot_roundtrip() {
-        push("hello from test".into());
-        assert!(snapshot().iter().any(|l| l == "hello from test"));
+        push(Level::Info, "hello from test".into());
+        assert!(snapshot(LevelFilter::Info)
+            .iter()
+            .any(|l| l == "hello from test"));
     }
 
     #[test]

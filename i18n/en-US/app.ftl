@@ -48,6 +48,11 @@ field-protocol = Protocol
 new-group-option = + New group…
 ph-port = e.g. 3000
 
+## Dialog — inline validation
+err-field-name-required = Name is required.
+err-field-port-required = Port number is required.
+err-field-port-range = Port must be between 1 and 65535.
+
 ## Confirmations
 confirm-delete-group = Delete group "{ $name }" and all of its ports? This cannot be undone.
 confirm-delete-port = Delete port { $port } from "{ $group }"? Other ports are not affected.
@@ -91,9 +96,17 @@ req-install-hint = Turning on "Start with Windows" installs the app into your us
 
 ## Settings
 settings-title = Settings
+settings-section-general = General
+settings-section-status = Status
+settings-section-about = About
 field-auto-start = Start with Windows
 field-probe-interval = Probe interval (seconds)
 field-default-expiration = Default expiration
+field-log-level = Log level
+log-level-error = Error
+log-level-warn = Warning
+log-level-info = Info
+log-level-debug = Debug
 btn-close = Close
 
 ## Settings — uninstall

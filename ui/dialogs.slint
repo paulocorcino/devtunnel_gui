@@ -17,6 +17,9 @@ export struct GroupItem {
 // Shared modal chrome: dimmed backdrop + centered card + keyboard handling.
 export component DialogShell inherits Rectangle {
     in property <string> title;
+    // Card width; defaults to the standard dialog. Wider dialogs (Settings)
+    // override it.
+    in property <length> card-width: Theme.dialog-width;
     in-out property <bool> open;
     // Enter anywhere in the dialog.
     callback confirm();
@@ -54,7 +57,7 @@ export component DialogShell inherits Rectangle {
         card := Rectangle {
             x: (parent.width - self.width) / 2;
             y: (parent.height - self.height) / 2;
-            width: Theme.dialog-width;
+            width: root.card-width;
             height: body.preferred-height;
             background: Theme.surface-2;
             border-color: Theme.border;
@@ -90,6 +93,11 @@ export component CreateGroupDialog inherits Rectangle {
                     string /*description*/, bool /*keep-headers*/, string /*request-timeout*/);
     callback cancel();
 
+    // Inline validation message; empty when the form is valid. Shown in the
+    // dialog so a missing required field never closes the modal and surfaces in
+    // the top status bar (issue: confusing out-of-context error).
+    property <string> error;
+
     // Reset to defaults every time the dialog opens.
     changed open => {
         if (root.open) {
@@ -100,10 +108,16 @@ export component CreateGroupDialog inherits Rectangle {
             kh-c.checked = false;
             to-f.text = "";
             adv.expanded = false;
+            root.error = "";
         }
     }
 
     function do-submit() {
+        if (name-f.text == "") {
+            root.error = Strings.err-field-name-required;
+            return;
+        }
+        root.error = "";
         root.submit(name-f.text, exp-f.days, anon-c.checked,
                     desc-f.text, kh-c.checked, to-f.text);
         root.open = false;
@@ -159,6 +173,13 @@ export component CreateGroupDialog inherits Rectangle {
             }
         }
 
+        if root.error != "" : Text {
+            text: root.error;
+            color: Theme.down;
+            font-size: Theme.fs-caption;
+            wrap: word-wrap;
+        }
+
         HorizontalLayout {
             spacing: Theme.gap;
             alignment: end;
@@ -194,6 +215,9 @@ export component AddPortDialog inherits Rectangle {
     property <string> selected-id: root.group-ids[group-s.current-index];
     // State for the field nested in an `if` block (its id isn't reachable here).
     property <string> newname-val: "";
+    // Inline validation message; empty when valid (issue: missing required field
+    // closed the modal and showed the error in the top status bar).
+    property <string> error;
 
     changed open => {
         if (root.open) {
@@ -205,10 +229,25 @@ export component AddPortDialog inherits Rectangle {
             kh-c.checked = false;
             to-f.text = "";
             adv.expanded = false;
+            root.error = "";
         }
     }
 
     function do-submit() {
+        // A new group needs a name.
+        if (root.selected-id == "" && root.newname-val == "") {
+            root.error = Strings.err-field-name-required;
+            return;
+        }
+        if (port-f.text == "") {
+            root.error = Strings.err-field-port-required;
+            return;
+        }
+        if (port-f.text.to-float() < 1 || port-f.text.to-float() > 65535) {
+            root.error = Strings.err-field-port-range;
+            return;
+        }
+        root.error = "";
         root.submit(root.selected-id, root.newname-val, port-f.text,
                     proto-s.current-value, desc-f.text, kh-c.checked, to-f.text);
         root.open = false;
@@ -275,6 +314,13 @@ export component AddPortDialog inherits Rectangle {
                     root.do-submit();
                 }
             }
+        }
+
+        if root.error != "" : Text {
+            text: root.error;
+            color: Theme.down;
+            font-size: Theme.fs-caption;
+            wrap: word-wrap;
         }
 
         HorizontalLayout {
