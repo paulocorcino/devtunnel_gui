@@ -265,6 +265,10 @@ fn main() -> anyhow::Result<()> {
     // Preflight results (startup probe + after sign-in) pumped to the UI thread.
     let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
 
+    // CLI install (winget) outcomes pumped to the UI thread so the banner can
+    // clear "Installing…" and surface a clear success / failure / elevation result.
+    let (install_tx, install_rx) = std::sync::mpsc::channel::<devtunnel::InstallOutcome>();
+
     // Selected-port metrics results, tagged with (tunnel_id, port) so the pump
     // can drop results that arrive after the selection changed.
     let (metrics_tx, metrics_rx) =
@@ -343,29 +347,19 @@ fn main() -> anyhow::Result<()> {
         });
     }
     // ---- Settings: install the Dev Tunnels CLI on demand (winget + fallback) ----
+    // The callback runs on the UI thread: flag "installing" so the banner shows
+    // "Installing…" + disables the button, then run winget off-thread and pump the
+    // classified outcome back to the UI pump (which clears the flag and surfaces it).
     {
-        let pf_tx = pf_tx.clone();
+        let weak = app.as_weak();
+        let install_tx = install_tx.clone();
         app.on_install_cli(move || {
-            let pf_tx = pf_tx.clone();
-            std::thread::spawn(move || match devtunnel::install_cli() {
-                // Re-run preflight so the banner + requirements rows update.
-                devtunnel::InstallOutcome::Installed => {
-                    let _ = pf_tx.send(devtunnel::preflight());
-                }
-                // winget unavailable — open the official install page instead.
-                devtunnel::InstallOutcome::WingetMissing => {
-                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
-                }
-                // winget ran but failed: log it and fall back to the install page
-                // so the user who clicked the button still gets somewhere to go.
-                devtunnel::InstallOutcome::Elevation => {
-                    log::warn!("install_cli: administrator privileges required");
-                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
-                }
-                devtunnel::InstallOutcome::Failed(e) => {
-                    log::warn!("install_cli: {e}");
-                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
-                }
+            if let Some(a) = weak.upgrade() {
+                a.set_installing(true);
+            }
+            let install_tx = install_tx.clone();
+            std::thread::spawn(move || {
+                let _ = install_tx.send(devtunnel::install_cli());
             });
         });
     }
@@ -810,6 +804,7 @@ fn main() -> anyhow::Result<()> {
         let auto_resume_pending = auto_resume_pending.clone();
         let renew_pending = renew_pending.clone();
         let tx = tx.clone();
+        let pf_tx = pf_tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -832,6 +827,39 @@ fn main() -> anyhow::Result<()> {
                         toggle_window(&weak);
                     }
                 }
+                // CLI install outcomes -> clear "Installing…" and surface a
+                // clear result instead of swallowing failures.
+                while let Ok(outcome) = install_rx.try_recv() {
+                    if let Some(a) = weak.upgrade() {
+                        a.set_installing(false);
+                        match outcome {
+                            // Re-run preflight so the banner + requirements rows
+                            // advance to the next gate (sign-in / ready).
+                            devtunnel::InstallOutcome::Installed => {
+                                a.set_status(loc.t("install-status-done").into());
+                                let _ = pf_tx.send(devtunnel::preflight());
+                            }
+                            // winget unavailable — open the manual install page.
+                            devtunnel::InstallOutcome::WingetMissing => {
+                                a.set_status(loc.t("install-status-winget-missing").into());
+                                let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                            }
+                            // Needs admin: surface it and fall back to the page.
+                            devtunnel::InstallOutcome::Elevation => {
+                                a.set_status(loc.t("install-status-elevation").into());
+                                let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                            }
+                            // Any other failure: show the trimmed winget stderr.
+                            devtunnel::InstallOutcome::Failed(e) => {
+                                log::warn!("install_cli: {e}");
+                                let mut args = FluentArgs::new();
+                                args.set("message", e);
+                                a.set_status(loc.t_args("install-status-failed", &args).into());
+                            }
+                        }
+                    }
+                }
+
                 // Preflight results -> set app-state, swap the tray icon, and
                 // kick the initial load when the environment is ready.
                 while let Ok(pf) = pf_rx.try_recv() {
