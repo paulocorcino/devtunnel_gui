@@ -1724,6 +1724,11 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_banner_relogin_title(loc.t("banner-relogin-title").into());
     s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
     s.set_btn_sign_in(loc.t("btn-sign-in").into());
+    s.set_banner_action_open_settings(loc.t("banner-action-open-settings").into());
+    s.set_install_status_running(loc.t("install-status-running").into());
+    s.set_install_status_done(loc.t("install-status-done").into());
+    s.set_install_status_elevation(loc.t("install-status-elevation").into());
+    s.set_install_status_winget_missing(loc.t("install-status-winget-missing").into());
 
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());

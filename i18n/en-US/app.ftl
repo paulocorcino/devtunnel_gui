@@ -118,6 +118,14 @@ banner-relogin-title = Sign in required
 banner-relogin-body = Your Dev Tunnels login is missing or has expired. Sign in to continue.
 relogin-message = Sign-in expired — sign in again to keep hosting
 btn-sign-in = Sign in
+banner-action-open-settings = Open Settings
+
+## Install CLI progress / outcome
+install-status-running = Installing…
+install-status-done = Dev Tunnels CLI installed
+install-status-failed = Install failed: { $message }
+install-status-elevation = Install needs administrator rights — opening the manual install page
+install-status-winget-missing = winget not available — opening the manual install page
 status-signing-in = signing in…
 toast-relogin-title = DevTunnel GUI — sign-in required
 toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
