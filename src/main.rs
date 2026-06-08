@@ -30,6 +30,14 @@ use tray_icon::{
     Icon, TrayIconBuilder, TrayIconEvent,
 };
 
+/// A data-load result pumped from a background thread to the UI thread:
+/// `(placeholder id to remove, hidden-delete key to clear, fetched rows)`.
+type LoadMsg = (
+    Option<u64>,
+    Option<(String, Option<i32>)>,
+    anyhow::Result<Vec<devtunnel::Row>>,
+);
+
 /// What a tray menu item does when clicked. The `MenuId -> Action` map is
 /// rebuilt on every data load because per-port items depend on live data.
 enum Action {
@@ -252,11 +260,7 @@ fn main() -> anyhow::Result<()> {
     // The UI thread (timer) applies the result to the window and rebuilds the
     // tray menu, keeping non-`Send` objects (tray, app) off the background thread.
     // The `Option<u64>` carries the placeholder id to remove on completion (None for plain loads).
-    let (tx, rx) = std::sync::mpsc::channel::<(
-        Option<u64>,
-        Option<(String, Option<i32>)>,
-        anyhow::Result<Vec<devtunnel::Row>>,
-    )>();
+    let (tx, rx) = std::sync::mpsc::channel::<LoadMsg>();
 
     // Preflight results (startup probe + after sign-in) pumped to the UI thread.
     let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
@@ -1238,15 +1242,7 @@ fn open_browser(url: &str) {
 }
 
 /// Fires the fetch on a background thread; the result comes back via `Sender`.
-fn load_async(
-    weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(
-        Option<u64>,
-        Option<(String, Option<i32>)>,
-        anyhow::Result<Vec<devtunnel::Row>>,
-    )>,
-    loc: &Rc<Locale>,
-) {
+fn load_async(weak: &slint::Weak<AppWindow>, tx: &Sender<LoadMsg>, loc: &Rc<Locale>) {
     if let Some(a) = weak.upgrade() {
         a.set_status(loc.t("status-refreshing").into());
     }
@@ -1286,11 +1282,7 @@ fn renew_async(ids: Vec<String>, expiration: String) {
 /// `hidden_key` is the hidden-delete key to clear when the op settles.
 fn run_op_async<F>(
     weak: &slint::Weak<AppWindow>,
-    tx: &Sender<(
-        Option<u64>,
-        Option<(String, Option<i32>)>,
-        anyhow::Result<Vec<devtunnel::Row>>,
-    )>,
+    tx: &Sender<LoadMsg>,
     status_key: &str,
     loc: &Rc<Locale>,
     placeholder: Option<u64>,
@@ -1314,6 +1306,10 @@ fn run_op_async<F>(
 /// Applies a load result: fills the list and rebuilds the tray menu.
 /// Always runs on the UI thread (called by the timer). Returns `true` when the
 /// load succeeded (used to trigger the one-shot auto-resume).
+// Each argument is a distinct UI-thread handle (window, tray, action map, live
+// state, optimistic-update keys, the result, locale); bundling them into a
+// struct would only move the same fields behind one indirection.
+#[allow(clippy::too_many_arguments)]
 fn apply_rows(
     weak: &slint::Weak<AppWindow>,
     tray: &tray_icon::TrayIcon,
@@ -1616,7 +1612,7 @@ fn build_tray_menu(
     actions.clear();
     let menu = Menu::new();
 
-    let show = MenuItem::new(&loc.t("menu-open-window"), true, None);
+    let show = MenuItem::new(loc.t("menu-open-window"), true, None);
     actions.insert(show.id().clone(), Action::Show);
     let _ = menu.append(&show);
     let _ = menu.append(&PredefinedMenuItem::separator());
@@ -1626,8 +1622,8 @@ fn build_tray_menu(
             continue;
         }
         let sub = Submenu::new(format!("{} :{}", r.group, r.port), true);
-        let copy_it = MenuItem::new(&loc.t("menu-copy-url"), true, None);
-        let open_it = MenuItem::new(&loc.t("menu-open-browser"), true, None);
+        let copy_it = MenuItem::new(loc.t("menu-copy-url"), true, None);
+        let open_it = MenuItem::new(loc.t("menu-open-browser"), true, None);
         actions.insert(copy_it.id().clone(), Action::Copy(r.url.to_string()));
         actions.insert(open_it.id().clone(), Action::Open(r.url.to_string()));
         let _ = sub.append(&copy_it);
@@ -1636,7 +1632,7 @@ fn build_tray_menu(
     }
 
     let _ = menu.append(&PredefinedMenuItem::separator());
-    let quit = MenuItem::new(&loc.t("menu-quit"), true, None);
+    let quit = MenuItem::new(loc.t("menu-quit"), true, None);
     actions.insert(quit.id().clone(), Action::Quit);
     let _ = menu.append(&quit);
 
@@ -1765,6 +1761,64 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
 
     // Re-login
     s.set_relogin_message(loc.t("relogin-message").into());
+}
+
+/// Selects the winit backend with a window-attributes hook that sets the brand
+/// icon on every window at creation time (so the title bar and taskbar show it,
+/// not winit's generic default). Best-effort: logs and continues on failure.
+fn install_window_icon() {
+    const SIZE: u32 = 256;
+    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Normal);
+    let icon = match slint::winit_030::winit::window::Icon::from_rgba(rgba, SIZE, SIZE) {
+        Ok(icon) => icon,
+        Err(e) => {
+            log::warn!("window icon: failed to build ({e})");
+            return;
+        }
+    };
+    if let Err(e) = slint::BackendSelector::new()
+        .with_winit_window_attributes_hook(move |attrs| attrs.with_window_icon(Some(icon.clone())))
+        .select()
+    {
+        log::warn!("window icon: winit backend selection failed ({e})");
+    }
+}
+
+/// The brand tunnel-portal tray icon (procedurally rendered — see `icon_render`).
+fn build_icon() -> Icon {
+    const SIZE: u32 = 32;
+    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Normal);
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Amber warning variant shown on the tray while the app is not "ready"
+/// (CLI missing / re-login required).
+fn build_warning_icon() -> Icon {
+    const SIZE: u32 = 32;
+    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Warning);
+    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
+}
+
+/// Swaps the tray icon to match the app-level preflight state: the normal blue
+/// icon when "ready", the warning variant otherwise.
+fn update_tray_icon(tray: &tray_icon::TrayIcon, app_state: &str) {
+    let icon = if app_state == "ready" {
+        build_icon()
+    } else {
+        build_warning_icon()
+    };
+    let _ = tray.set_icon(Some(icon));
+}
+
+/// Fires the one-shot Windows toast for the re-login case (no toasts for any
+/// other status change). Best-effort: a toast failure is not worth surfacing.
+#[cfg(windows)]
+fn show_relogin_toast(loc: &Locale) {
+    use tauri_winrt_notification::Toast;
+    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
+        .title(&loc.t("toast-relogin-title"))
+        .text1(&loc.t("toast-relogin-body"))
+        .show();
 }
 
 #[cfg(test)]
@@ -1978,62 +2032,4 @@ mod tests {
         assert_eq!(visible.len(), 1);
         assert_eq!(visible[0].tunnel_id, "tid2");
     }
-}
-
-/// Selects the winit backend with a window-attributes hook that sets the brand
-/// icon on every window at creation time (so the title bar and taskbar show it,
-/// not winit's generic default). Best-effort: logs and continues on failure.
-fn install_window_icon() {
-    const SIZE: u32 = 256;
-    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Normal);
-    let icon = match slint::winit_030::winit::window::Icon::from_rgba(rgba, SIZE, SIZE) {
-        Ok(icon) => icon,
-        Err(e) => {
-            log::warn!("window icon: failed to build ({e})");
-            return;
-        }
-    };
-    if let Err(e) = slint::BackendSelector::new()
-        .with_winit_window_attributes_hook(move |attrs| attrs.with_window_icon(Some(icon.clone())))
-        .select()
-    {
-        log::warn!("window icon: winit backend selection failed ({e})");
-    }
-}
-
-/// The brand tunnel-portal tray icon (procedurally rendered — see `icon_render`).
-fn build_icon() -> Icon {
-    const SIZE: u32 = 32;
-    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Normal);
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
-}
-
-/// Amber warning variant shown on the tray while the app is not "ready"
-/// (CLI missing / re-login required).
-fn build_warning_icon() -> Icon {
-    const SIZE: u32 = 32;
-    let rgba = icon_render::rgba(SIZE, icon_render::IconVariant::Warning);
-    Icon::from_rgba(rgba, SIZE, SIZE).expect("invalid tray icon rgba data")
-}
-
-/// Swaps the tray icon to match the app-level preflight state: the normal blue
-/// icon when "ready", the warning variant otherwise.
-fn update_tray_icon(tray: &tray_icon::TrayIcon, app_state: &str) {
-    let icon = if app_state == "ready" {
-        build_icon()
-    } else {
-        build_warning_icon()
-    };
-    let _ = tray.set_icon(Some(icon));
-}
-
-/// Fires the one-shot Windows toast for the re-login case (no toasts for any
-/// other status change). Best-effort: a toast failure is not worth surfacing.
-#[cfg(windows)]
-fn show_relogin_toast(loc: &Locale) {
-    use tauri_winrt_notification::Toast;
-    let _ = Toast::new(Toast::POWERSHELL_APP_ID)
-        .title(&loc.t("toast-relogin-title"))
-        .text1(&loc.t("toast-relogin-body"))
-        .show();
 }

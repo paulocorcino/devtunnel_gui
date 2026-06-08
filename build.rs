@@ -22,7 +22,12 @@ fn main() {
 fn emit_git_version() {
     // Rebuild when the checked-out commit or tags change. Working-tree
     // dirtiness is best-effort and not fully tracked here.
-    for path in [".git/HEAD", ".git/index", ".git/packed-refs", ".git/refs/tags"] {
+    for path in [
+        ".git/HEAD",
+        ".git/index",
+        ".git/packed-refs",
+        ".git/refs/tags",
+    ] {
         println!("cargo:rerun-if-changed={path}");
     }
 
