@@ -39,6 +39,14 @@ fn bin() -> String {
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
+/// Process creation flag that gives a child its own console window. Used only by
+/// the interactive `user login` flow: unlike the silent one-shot calls (which use
+/// [`CREATE_NO_WINDOW`]), login needs a real console to open the browser and show
+/// the device-code prompt. Suppressing it leaves the auth flow with nowhere to
+/// surface, so the "Sign in" click appears to do nothing.
+#[cfg(windows)]
+const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+
 /// Builds a `Command` for `program` with the console window suppressed on
 /// Windows. Every subprocess in this module must go through here: without the
 /// flag, each one-shot `devtunnel`/`winget` call flashes a black console window,
@@ -204,8 +212,33 @@ pub fn is_auth_error(stderr: &str) -> bool {
 /// Runs `devtunnel user login` (interactive — opens the system browser) and
 /// waits for it to finish. The caller re-runs [`preflight`] afterwards to
 /// confirm the login took effect.
+///
+/// Unlike the silent one-shot calls, this does **not** go through [`command`]:
+/// login is interactive and must inherit stdio (so the CLI can drive its auth
+/// flow) and get a real console on Windows ([`CREATE_NEW_CONSOLE`]). Routing it
+/// through the [`CREATE_NO_WINDOW`] helper made the click silently no-op.
 pub fn user_login(loc: &Locale) -> Result<()> {
-    run_ok(&["user", "login"], loc)
+    let mut cmd = Command::new(bin());
+    cmd.args(["user", "login"]);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    // `.status()` inherits stdio (no piping), so the interactive prompt and the
+    // device-code/browser flow are visible to the user.
+    let status = cmd.status().with_context(|| {
+        let mut a = FluentArgs::new();
+        a.set("args", "user login".to_string());
+        loc.t_args("err-cli-not-found", &a)
+    })?;
+    if !status.success() {
+        let mut a = FluentArgs::new();
+        a.set("args", "user login".to_string());
+        a.set("stderr", String::new());
+        return Err(anyhow!("{}", loc.t_args("err-cli-failed", &a)));
+    }
+    Ok(())
 }
 
 /// Options for creating a group (tunnel). Mirrors the minimal + advanced fields
