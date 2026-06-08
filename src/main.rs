@@ -219,8 +219,9 @@ fn main() -> anyhow::Result<()> {
 
     let loc = Rc::new(Locale::load(&locale::system_locale()));
     apply_strings(&app, &loc);
-    // App version for the About panel (not localized — comes from Cargo).
-    app.set_app_version(env!("CARGO_PKG_VERSION").into());
+    // App version for the About panel (not localized). Derived from git tags at
+    // build time (see build.rs); falls back to the Cargo version off a checkout.
+    app.set_app_version(env!("GIT_VERSION").into());
 
     // Tray menu action map (rebuilt on every refresh). Lives only on the UI
     // thread — `Rc`/`RefCell` is enough (nothing crosses thread boundaries).
@@ -1753,6 +1754,7 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
 
     // About
     s.set_about_title(loc.t("about-title").into());
+    s.set_about_app_name(loc.t("about-app-name").into());
     s.set_about_version_label(loc.t("about-version-label").into());
     s.set_about_tagline(loc.t("about-tagline").into());
     s.set_about_built_on(loc.t("about-built-on").into());
