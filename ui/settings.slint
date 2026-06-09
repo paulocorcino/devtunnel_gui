@@ -1,11 +1,12 @@
 // Settings dialog (issue #5): app-level options on the shared modal chrome.
-// Uses the same DialogShell + themed Field/Check controls as the create/add
-// dialogs so it matches the rest of the app (the old std-widgets LineEdit and
-// CheckBox ignored the theme and rendered as oversized light boxes).
+// Laid out as a left nav rail (General / Status / About) over a content pane so
+// the requirements checklist and About blurb no longer clutter the actual
+// settings. Uses the same DialogShell + themed Field/Check/Select controls as the
+// create/add dialogs so it matches the rest of the app.
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
 import { TxtButton } from "controls.slint";
-import { Field, DaysField, Check } from "field.slint";
+import { Field, DaysField, Check, Select } from "field.slint";
 import { DialogShell } from "dialogs.slint";
 
 // Clickable inline link rendered in the accent color. Opens an external URL
@@ -16,6 +17,34 @@ component Link inherits Text {
     font-size: Theme.fs-caption;
     TouchArea {
         mouse-cursor: pointer;
+        clicked => {
+            root.clicked();
+        }
+    }
+}
+
+// One entry in the left nav rail: accent + bold when active.
+component NavItem inherits Rectangle {
+    in property <string> text;
+    in property <bool> active: false;
+    callback clicked();
+
+    height: Theme.btn-height;
+    background: root.active ? Theme.surface : transparent;
+    border-radius: Theme.gap-sm;
+
+    HorizontalLayout {
+        padding-left: Theme.gap;
+        padding-right: Theme.gap;
+        Text {
+            text: root.text;
+            color: root.active ? Theme.accent : Theme.text;
+            font-size: Theme.fs-body;
+            font-weight: root.active ? 700 : 400;
+            vertical-alignment: center;
+        }
+    }
+    TouchArea {
         clicked => {
             root.clicked();
         }
@@ -53,9 +82,14 @@ export component SettingsDialog inherits Rectangle {
     // Requirements checklist state (set from Rust each time the dialog opens).
     in property <bool> req-cli-ok;
     in property <bool> req-login-ok;
+    // Logged-in account (e.g. an email); empty when logged out or not yet fetched.
+    in property <string> req-login-account;
     in property <bool> req-installed-ok;
     in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
+    // True while the CLI install (winget) is running — disables the Install CLI
+    // button and swaps its label for "Installing…", matching the banner.
+    in property <bool> installing;
     // Requirements actions.
     callback install-cli();
     callback sign-in();
@@ -75,194 +109,284 @@ export component SettingsDialog inherits Rectangle {
     // Default expiration for new groups and the renewal target, in days (issue #6).
     in-out property <int> default-expiration-days;
     callback default-expiration-changed(int /*days*/);
+    // Minimum severity shown in the Logs tab ("error"/"warn"/"info"/"debug").
+    in-out property <string> log-level: "info";
+    callback log-level-changed(string);
+
+    // Active nav section: 0 = General, 1 = Status, 2 = About.
+    property <int> section: 0;
+
+    // Editable field state lives on root (not on element ids) because the inputs
+    // are nested inside `if section == …` blocks, whose ids are not reachable
+    // from the component's functions. Each field binds two-way to one of these.
+    property <string> probe-text;
+    property <string> exp-text;
+    property <int> loglevel-index: 2;
+
+    // Clamp helper mirroring DaysField (min 1, max 30 days).
+    pure function exp-days() -> int {
+        Math.max(Math.min(root.exp-text.to-float(), 30), 1)
+    }
+    // Map the persisted log-level enum to/from the Select index.
+    pure function level-index(s: string) -> int {
+        s == "error" ? 0 : (s == "warn" ? 1 : (s == "debug" ? 3 : 2))
+    }
+    pure function index-level(i: int) -> string {
+        i == 0 ? "error" : (i == 1 ? "warn" : (i == 3 ? "debug" : "info"))
+    }
 
     // Re-seed the editors from the Rust-set properties every time the dialog
     // opens (a manual edit severs a plain binding, so reset explicitly).
     changed open => {
         if (root.open) {
-            probe-f.text = root.probe-interval;
-            exp-f.text = root.default-expiration-days;
+            root.probe-text = root.probe-interval;
+            root.exp-text = root.default-expiration-days;
+            root.loglevel-index = root.level-index(root.log-level);
+            root.section = 0;
         }
+    }
+    // Emit the log-level change when the picker moves.
+    changed loglevel-index => {
+        root.log-level = root.index-level(root.loglevel-index);
+        root.log-level-changed(root.log-level);
     }
 
     function commit-probe() {
-        if (probe-f.text.is-float()) {
-            root.probe-interval = probe-f.text.to-float();
+        if (root.probe-text.is-float()) {
+            root.probe-interval = root.probe-text.to-float();
             root.probe-interval-changed(root.probe-interval);
         }
     }
     function commit-expiration() {
-        root.default-expiration-days = exp-f.days;
-        root.default-expiration-changed(exp-f.days);
+        root.default-expiration-days = root.exp-days();
+        root.default-expiration-changed(root.exp-days());
     }
 
     DialogShell {
         width: 100%;
         height: 100%;
+        card-width: Theme.settings-dialog-width;
         open <=> root.open;
         title: Strings.settings-title;
         confirm => {
             root.open = false;
         }
 
-        // ---- Requirements checklist ----
-        VerticalLayout {
-            spacing: Theme.gap-sm;
-            Text {
-                text: Strings.req-title;
-                color: Theme.text;
-                font-size: Theme.fs-section;
-                font-weight: 700;
-            }
-            ReqRow {
-                ok: root.req-cli-ok;
-                label: Strings.req-cli;
-                if !root.req-cli-ok: TxtButton {
-                    text: Strings.btn-install-cli;
-                    clicked => {
-                        root.install-cli();
-                    }
-                }
-            }
-            ReqRow {
-                ok: root.req-login-ok;
-                label: Strings.req-login;
-                if !root.req-login-ok: TxtButton {
-                    text: Strings.btn-sign-in;
-                    clicked => {
-                        root.sign-in();
-                    }
-                }
-            }
-            ReqRow {
-                ok: root.req-installed-ok;
-                label: Strings.req-installed;
-            }
-            ReqRow {
-                ok: root.req-shortcut-ok;
-                label: Strings.req-shortcut;
-            }
-            ReqRow {
-                ok: root.req-autostart-ok;
-                label: Strings.req-autostart;
-            }
-            Text {
-                text: Strings.req-install-hint;
-                color: Theme.muted;
-                font-size: Theme.fs-caption;
-                wrap: word-wrap;
-            }
-        }
-        Rectangle {
-            height: 1px;
-            background: Theme.border;
-        }
-
-        Check {
-            text: Strings.field-auto-start;
-            checked <=> root.auto-start;
-            toggled(on) => {
-                root.auto-start-changed(on);
-            }
-        }
-
-        probe-f := Field {
-            label: Strings.field-probe-interval;
-            number-only: true;
-            edited => {
-                root.commit-probe();
-            }
-            accepted => {
-                root.commit-probe();
-            }
-        }
-
-        exp-f := DaysField {
-            label: Strings.field-default-expiration;
-            edited => {
-                root.commit-expiration();
-            }
-            accepted => {
-                root.commit-expiration();
-            }
-        }
-
-        // ---- About ----
-        Rectangle {
-            height: 1px;
-            background: Theme.border;
-        }
-        VerticalLayout {
-            spacing: Theme.gap-sm;
-
-            Text {
-                text: Strings.about-title;
-                color: Theme.text;
-                font-size: Theme.fs-section;
-                font-weight: 700;
-            }
-            Text {
-                text: Strings.about-app-name + " · " + Strings.about-version-label + " " + root.app-version;
-                color: Theme.text;
-                font-size: Theme.fs-body;
-            }
-            Text {
-                text: Strings.about-tagline;
-                color: Theme.muted;
-                font-size: Theme.fs-caption;
-                wrap: word-wrap;
-            }
-            Text {
-                text: Strings.about-built-on;
-                color: Theme.muted;
-                font-size: Theme.fs-caption;
-                wrap: word-wrap;
-            }
-            Text {
-                text: Strings.about-created-by;
-                color: Theme.text;
-                font-size: Theme.fs-caption;
-            }
-            HorizontalLayout {
-                spacing: Theme.gap;
-                alignment: start;
-                Link {
-                    text: Strings.about-link-docs;
-                    clicked => {
-                        root.open-url("https://learn.microsoft.com/azure/developer/dev-tunnels/overview");
-                    }
-                }
-                Link {
-                    text: Strings.about-link-repo;
-                    clicked => {
-                        root.open-url("https://github.com/paulocorcino/devtunnel_gui");
-                    }
-                }
-                Link {
-                    text: Strings.about-link-license;
-                    clicked => {
-                        root.open-url("https://github.com/paulocorcino/devtunnel_gui/blob/main/LICENSE");
-                    }
-                }
-            }
-        }
-
-        // ---- Danger zone: uninstall (only meaningful once installed) ----
-        if root.req-installed-ok: Rectangle {
-            height: 1px;
-            background: Theme.border;
-        }
-
         HorizontalLayout {
-            spacing: Theme.gap;
-            alignment: end;
-            if root.req-installed-ok: TxtButton {
-                text: Strings.btn-uninstall;
-                danger: true;
-                clicked => {
-                    root.uninstall();
+            spacing: Theme.pad;
+
+            // ---- Left nav rail ----
+            VerticalLayout {
+                width: Theme.settings-nav-width;
+                spacing: Theme.gap-sm;
+                alignment: start;
+                NavItem {
+                    text: Strings.settings-section-general;
+                    active: root.section == 0;
+                    clicked => {
+                        root.section = 0;
+                    }
+                }
+                NavItem {
+                    text: Strings.settings-section-status;
+                    active: root.section == 1;
+                    clicked => {
+                        root.section = 1;
+                    }
+                }
+                NavItem {
+                    text: Strings.settings-section-about;
+                    active: root.section == 2;
+                    clicked => {
+                        root.section = 2;
+                    }
                 }
             }
+
+            // Divider between rail and content.
+            Rectangle {
+                width: 1px;
+                background: Theme.border;
+            }
+
+            // ---- Content pane ----
+            VerticalLayout {
+                horizontal-stretch: 1;
+                spacing: Theme.gap;
+
+                // -- General --
+                if root.section == 0 : VerticalLayout {
+                    spacing: Theme.gap;
+                    Check {
+                        text: Strings.field-auto-start;
+                        checked <=> root.auto-start;
+                        toggled(on) => {
+                            root.auto-start-changed(on);
+                        }
+                    }
+                    Field {
+                        label: Strings.field-probe-interval;
+                        number-only: true;
+                        text <=> root.probe-text;
+                        edited => {
+                            root.commit-probe();
+                        }
+                        accepted => {
+                            root.commit-probe();
+                        }
+                    }
+                    DaysField {
+                        label: Strings.field-default-expiration;
+                        text <=> root.exp-text;
+                        edited => {
+                            root.commit-expiration();
+                        }
+                        accepted => {
+                            root.commit-expiration();
+                        }
+                    }
+                    Select {
+                        label: Strings.field-log-level;
+                        current-index <=> root.loglevel-index;
+                        model: [
+                            Strings.log-level-error,
+                            Strings.log-level-warn,
+                            Strings.log-level-info,
+                            Strings.log-level-debug,
+                        ];
+                    }
+                }
+
+                // -- Status (requirements + uninstall) --
+                if root.section == 1 : VerticalLayout {
+                    spacing: Theme.gap-sm;
+                    Text {
+                        text: Strings.req-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-section;
+                        font-weight: 700;
+                    }
+                    ReqRow {
+                        ok: root.req-cli-ok;
+                        label: Strings.req-cli;
+                        if !root.req-cli-ok: TxtButton {
+                            text: root.installing ? Strings.install-status-running : Strings.btn-install-cli;
+                            enabled: !root.installing;
+                            clicked => {
+                                root.install-cli();
+                            }
+                        }
+                    }
+                    ReqRow {
+                        ok: root.req-login-ok;
+                        label: root.req-login-ok && root.req-login-account != ""
+                            ? Strings.req-login-as + " " + root.req-login-account
+                            : Strings.req-login;
+                        if !root.req-login-ok: TxtButton {
+                            text: Strings.btn-sign-in;
+                            clicked => {
+                                root.sign-in();
+                            }
+                        }
+                    }
+                    ReqRow {
+                        ok: root.req-installed-ok;
+                        label: Strings.req-installed;
+                    }
+                    ReqRow {
+                        ok: root.req-shortcut-ok;
+                        label: Strings.req-shortcut;
+                    }
+                    ReqRow {
+                        ok: root.req-autostart-ok;
+                        label: Strings.req-autostart;
+                    }
+                    Text {
+                        text: Strings.req-install-hint;
+                        color: Theme.muted;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                    }
+                    // Danger zone: uninstall (only meaningful once installed).
+                    if root.req-installed-ok: Rectangle {
+                        height: 1px;
+                        background: Theme.border;
+                    }
+                    if root.req-installed-ok: HorizontalLayout {
+                        alignment: start;
+                        TxtButton {
+                            text: Strings.btn-uninstall;
+                            danger: true;
+                            clicked => {
+                                root.uninstall();
+                            }
+                        }
+                    }
+                }
+
+                // -- About --
+                if root.section == 2 : VerticalLayout {
+                    spacing: Theme.gap-sm;
+                    Text {
+                        text: Strings.about-title;
+                        color: Theme.text;
+                        font-size: Theme.fs-section;
+                        font-weight: 700;
+                    }
+                    Text {
+                        text: Strings.about-app-name + " · " + Strings.about-version-label + " " + root.app-version;
+                        color: Theme.text;
+                        font-size: Theme.fs-body;
+                    }
+                    Text {
+                        text: Strings.about-tagline;
+                        color: Theme.muted;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.about-built-on;
+                        color: Theme.muted;
+                        font-size: Theme.fs-caption;
+                        wrap: word-wrap;
+                    }
+                    Text {
+                        text: Strings.about-created-by;
+                        color: Theme.text;
+                        font-size: Theme.fs-caption;
+                    }
+                    HorizontalLayout {
+                        spacing: Theme.gap;
+                        alignment: start;
+                        Link {
+                            text: Strings.about-link-docs;
+                            clicked => {
+                                root.open-url("https://learn.microsoft.com/azure/developer/dev-tunnels/overview");
+                            }
+                        }
+                        Link {
+                            text: Strings.about-link-repo;
+                            clicked => {
+                                root.open-url("https://github.com/paulocorcino/devtunnel_gui");
+                            }
+                        }
+                        Link {
+                            text: Strings.about-link-license;
+                            clicked => {
+                                root.open-url("https://github.com/paulocorcino/devtunnel_gui/blob/main/LICENSE");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- Footer ----
+        Rectangle {
+            height: 1px;
+            background: Theme.border;
+        }
+        HorizontalLayout {
             Rectangle { horizontal-stretch: 1; }
             TxtButton {
                 text: Strings.btn-close;

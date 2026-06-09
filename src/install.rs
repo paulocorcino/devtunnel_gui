@@ -1,12 +1,12 @@
 //! Per-user install of the portable executable.
 //!
 //! The app ships as a single portable `.exe` (downloaded from CI). When the user
-//! enables "Start with Windows" while running that portable file, we relocate it
-//! into the standard no-admin per-user programs folder
+//! enables "Start with Windows" while running that portable file, we copy it into
+//! the standard no-admin per-user programs folder
 //! (`%LOCALAPPDATA%\Programs\DevTunnelGUI`), create a Start-menu shortcut, point
-//! auto-start at the new location, relaunch from there, and delete the original
-//! portable file. Windows-only — the rest of the app's install story is moot
-//! elsewhere.
+//! auto-start at the new location, and relaunch from there. The original portable
+//! file is left in place — the user keeps the file they downloaded. Windows-only —
+//! the rest of the app's install story is moot elsewhere.
 
 #![cfg(windows)]
 
@@ -23,9 +23,6 @@ const APP_DIR_NAME: &str = "DevTunnelGUI";
 const EXE_NAME: &str = "devtunnel_gui.exe";
 /// Friendly name shown for the Start-menu shortcut (and its `.lnk` file stem).
 const SHORTCUT_NAME: &str = "DevTunnel GUI";
-/// CLI flag the relocated instance receives so it can delete the portable
-/// original it was launched from.
-pub const RELOCATED_FROM_FLAG: &str = "--relocated-from";
 
 /// `%LOCALAPPDATA%\Programs\DevTunnelGUI` — the no-admin per-user install dir.
 pub fn programs_dir() -> Option<PathBuf> {
@@ -104,12 +101,10 @@ pub fn create_start_menu_shortcut(target: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Relaunches `new_exe`, passing the portable original path so the fresh instance
-/// can delete it once this process exits. The caller exits after this returns Ok.
-pub fn relaunch_from(new_exe: &Path, old_exe: &Path) -> Result<()> {
+/// Relaunches the freshly installed copy at `new_exe`. The caller exits after this
+/// returns Ok. The portable original is left untouched.
+pub fn relaunch_installed(new_exe: &Path) -> Result<()> {
     std::process::Command::new(new_exe)
-        .arg(RELOCATED_FROM_FLAG)
-        .arg(old_exe)
         .spawn()
         .with_context(|| format!("relaunching {}", new_exe.display()))?;
     Ok(())
@@ -155,19 +150,6 @@ pub fn spawn_self_delete() -> Result<()> {
         .spawn()
         .with_context(|| format!("scheduling self-delete of {target}"))?;
     Ok(())
-}
-
-/// Deletes the portable original after relocation. The previous process needs a
-/// moment to exit and release the file lock, so retry briefly. Best-effort: a
-/// stubborn file left behind is harmless (auto-start already points at the copy).
-pub fn cleanup_relocated(old_exe: &Path) {
-    for _ in 0..20 {
-        match std::fs::remove_file(old_exe) {
-            Ok(()) => return,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
-            Err(_) => std::thread::sleep(std::time::Duration::from_millis(150)),
-        }
-    }
 }
 
 #[cfg(test)]

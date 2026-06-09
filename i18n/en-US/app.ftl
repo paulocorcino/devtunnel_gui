@@ -48,6 +48,11 @@ field-protocol = Protocol
 new-group-option = + New group…
 ph-port = e.g. 3000
 
+## Dialog — inline validation
+err-field-name-required = Name is required.
+err-field-port-required = Port number is required.
+err-field-port-range = Port must be between 1 and 65535.
+
 ## Confirmations
 confirm-delete-group = Delete group "{ $name }" and all of its ports? This cannot be undone.
 confirm-delete-port = Delete port { $port } from "{ $group }"? Other ports are not affected.
@@ -82,6 +87,7 @@ badge-hosted-external = Hosted elsewhere
 req-title = Requirements
 req-cli = Dev Tunnels CLI installed
 req-login = Signed in
+req-login-as = Signed in as
 req-installed = Installed in your programs folder
 req-shortcut = Start-menu shortcut created
 req-autostart = Starts with Windows
@@ -90,9 +96,17 @@ req-install-hint = Turning on "Start with Windows" installs the app into your us
 
 ## Settings
 settings-title = Settings
+settings-section-general = General
+settings-section-status = Status
+settings-section-about = About
 field-auto-start = Start with Windows
 field-probe-interval = Probe interval (seconds)
 field-default-expiration = Default expiration
+field-log-level = Log level
+log-level-error = Error
+log-level-warn = Warning
+log-level-info = Info
+log-level-debug = Debug
 btn-close = Close
 
 ## Settings — uninstall
@@ -118,6 +132,14 @@ banner-relogin-title = Sign in required
 banner-relogin-body = Your Dev Tunnels login is missing or has expired. Sign in to continue.
 relogin-message = Sign-in expired — sign in again to keep hosting
 btn-sign-in = Sign in
+banner-action-open-settings = Open Settings
+
+## Install CLI progress / outcome
+install-status-running = Installing…
+install-status-done = Dev Tunnels CLI installed
+install-status-failed = Install failed: { $message }
+install-status-elevation = Install needs administrator rights — opening the manual install page
+install-status-winget-missing = winget not available — opening the manual install page
 status-signing-in = signing in…
 toast-relogin-title = DevTunnel GUI — sign-in required
 toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.

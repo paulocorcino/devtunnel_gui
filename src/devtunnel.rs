@@ -107,17 +107,91 @@ pub fn preflight() -> Preflight {
     }
 }
 
+/// Returns the logged-in account identifier from `devtunnel user show -j`
+/// (the `username` field, e.g. an email), or `None` when logged out or the
+/// command/parse fails. Best-effort and read-only; safe to call off the UI
+/// thread to populate the Settings "Signed in as …" label.
+pub fn current_username() -> Option<String> {
+    let out = command(&bin())
+        .args(["user", "show", "-j"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let start = stdout.find(['{', '['])?;
+    let value: serde_json::Value = serde_json::from_str(stdout[start..].trim()).ok()?;
+    value
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+}
+
 /// Official Dev Tunnels CLI install page — opened as a fallback when `winget`
 /// itself is unavailable, so the user can install the CLI manually.
 pub const CLI_INSTALL_URL: &str =
     "https://learn.microsoft.com/azure/developer/dev-tunnels/get-started";
 
-/// Attempts to install the Dev Tunnels CLI via `winget`.
+/// Outcome of an attempt to install the Dev Tunnels CLI via `winget`.
 ///
-/// Returns `Ok(true)` when the install succeeded, `Ok(false)` when `winget` is
-/// not available (the caller should open [`CLI_INSTALL_URL`] instead), and `Err`
-/// when `winget` ran but reported a failure. Runs off the UI thread.
-pub fn install_cli() -> Result<bool> {
+/// Distinguishes the four cases the onboarding UI must surface differently:
+/// success, `winget` missing (fall back to the manual download page), an
+/// elevation/administrator requirement (a specific, actionable failure), and any
+/// other failure (carrying the trimmed `winget` stderr for display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// `winget` installed the CLI successfully.
+    Installed,
+    /// `winget` itself is not available — the caller should open [`CLI_INSTALL_URL`].
+    WingetMissing,
+    /// The install needs administrator/elevated privileges that the current
+    /// (non-elevated) process lacks.
+    Elevation,
+    /// `winget` ran but failed for some other reason; carries the trimmed stderr.
+    Failed(String),
+}
+
+/// Windows `ERROR_ELEVATION_REQUIRED` — the exit code a process gets when an
+/// operation needs administrator rights it does not have. Best-effort: `winget`
+/// usually surfaces its own HRESULT-style codes instead, so in practice the
+/// stderr substring heuristics below are what catch the elevation case; this
+/// constant is a cheap extra signal, not the primary detector.
+const ELEVATION_EXIT_CODE: i32 = 740;
+
+/// Pure classifier for a finished `winget install` run: maps the success flag,
+/// process exit code, and stderr to an [`InstallOutcome`]. An elevation hint in
+/// the stderr ("elevat", "administrator", "requires admin") or the Windows
+/// elevation exit code maps to [`InstallOutcome::Elevation`]; any other non-zero
+/// result maps to [`InstallOutcome::Failed`] with the trimmed stderr; success
+/// maps to [`InstallOutcome::Installed`]. Kept pure so it is unit-testable
+/// without spawning `winget`.
+pub fn classify_install_result(
+    success: bool,
+    exit_code: Option<i32>,
+    stderr: &str,
+) -> InstallOutcome {
+    if success {
+        return InstallOutcome::Installed;
+    }
+    let lower = stderr.to_ascii_lowercase();
+    let needs_elevation = lower.contains("elevat")
+        || lower.contains("administrator")
+        || lower.contains("requires admin")
+        || exit_code == Some(ELEVATION_EXIT_CODE);
+    if needs_elevation {
+        InstallOutcome::Elevation
+    } else {
+        InstallOutcome::Failed(stderr.trim().to_string())
+    }
+}
+
+/// Attempts to install the Dev Tunnels CLI via `winget`, returning a classified
+/// [`InstallOutcome`]. A spawn error (winget not on PATH) maps to
+/// [`InstallOutcome::WingetMissing`]; a finished process is routed through
+/// [`classify_install_result`]. Runs off the UI thread.
+pub fn install_cli() -> InstallOutcome {
     let out = command("winget")
         .args([
             "install",
@@ -130,12 +204,11 @@ pub fn install_cli() -> Result<bool> {
         .output();
     match out {
         // winget not found on PATH — signal the caller to open the download page.
-        Err(_) => Ok(false),
-        Ok(o) if o.status.success() => Ok(true),
-        Ok(o) => Err(anyhow!(
-            "winget install failed: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
+        Err(_) => InstallOutcome::WingetMissing,
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            classify_install_result(o.status.success(), o.status.code(), &stderr)
+        }
     }
 }
 
@@ -515,27 +588,91 @@ pub struct PortMetrics {
 
 /// Fetches the live metrics of one port via `show <id> -j`. Absent metrics map
 /// to `None`; a port missing from the tunnel is an error (it was deleted).
+///
+/// The service reports traffic at the **tunnel** level as human-readable strings
+/// (`uploadTotal: "4402 KB"`, `currentUploadRate: "0 MB/s (limit: 20 MB/s)"`),
+/// not as a numeric per-port `status` object — the port `status` is just a
+/// summary string like `"4 client connections"`. We therefore parse the
+/// tunnel-level strings back into bytes / bytes-per-second and read the
+/// connection count from the port's status string (falling back to the
+/// tunnel-level `clientConnections` number).
 pub fn fetch_port_status(tunnel_id: &str, port: i32, loc: &Locale) -> Result<PortMetrics> {
-    let show: ShowResult = run_json(&["show", tunnel_id, "-j"], loc)?;
-    let detail = show
-        .tunnel
-        .ports
-        .into_iter()
-        .find(|p| p.port_number == port)
-        .ok_or_else(|| {
-            let mut a = FluentArgs::new();
-            a.set("port", port as i64);
-            a.set("tunnel", tunnel_id.to_string());
-            anyhow!("{}", loc.t_args("err-port-not-found", &a))
-        })?;
-    let s = detail.status.unwrap_or_default();
+    let raw: serde_json::Value = run_json(&["show", tunnel_id, "-j"], loc)?;
+    let tunnel = raw.get("tunnel");
+
+    // Locate the port — its absence means it was deleted.
+    let port_val = tunnel
+        .and_then(|t| t.get("ports"))
+        .and_then(|p| p.as_array())
+        .and_then(|ports| {
+            ports
+                .iter()
+                .find(|p| p.get("portNumber").and_then(|n| n.as_i64()) == Some(port as i64))
+        });
+    let Some(port_val) = port_val else {
+        let mut a = FluentArgs::new();
+        a.set("port", port as i64);
+        a.set("tunnel", tunnel_id.to_string());
+        return Err(anyhow!("{}", loc.t_args("err-port-not-found", &a)));
+    };
+    let port_status = port_val.get("status").and_then(|v| v.as_str());
+
+    if log::log_enabled!(log::Level::Debug) {
+        log::debug!(
+            "port metrics[{tunnel_id}:{port}] up={:?} down={:?} upTotal={:?} downTotal={:?} status={:?}",
+            tunnel.and_then(|t| t.get("currentUploadRate")).and_then(|v| v.as_str()),
+            tunnel.and_then(|t| t.get("currentDownloadRate")).and_then(|v| v.as_str()),
+            tunnel.and_then(|t| t.get("uploadTotal")).and_then(|v| v.as_str()),
+            tunnel.and_then(|t| t.get("downloadTotal")).and_then(|v| v.as_str()),
+            port_status,
+        );
+    }
+
+    let tstr = |k: &str| tunnel.and_then(|t| t.get(k)).and_then(|v| v.as_str());
     Ok(PortMetrics {
-        upload_rate: s.current_upload_rate,
-        download_rate: s.current_download_rate,
-        upload_total: s.upload_total,
-        download_total: s.download_total,
-        connection_count: s.client_connection_count,
+        upload_rate: tstr("currentUploadRate").and_then(parse_rate_bps),
+        download_rate: tstr("currentDownloadRate").and_then(parse_rate_bps),
+        upload_total: tstr("uploadTotal").and_then(parse_size_bytes),
+        download_total: tstr("downloadTotal").and_then(parse_size_bytes),
+        connection_count: port_status.and_then(parse_leading_int).or_else(|| {
+            tunnel
+                .and_then(|t| t.get("clientConnections"))
+                .and_then(|v| v.as_f64())
+        }),
     })
+}
+
+/// Parses a size string such as `"4402 KB"`, `"1.2 MB"`, or (comma-locale)
+/// `"1,2 MB"` into bytes. Units are 1024-based (B/KB/MB/GB/TB). Returns `None`
+/// for an unrecognized shape.
+fn parse_size_bytes(s: &str) -> Option<f64> {
+    let s = s.trim();
+    let unit_pos = s.find(|c: char| c.is_ascii_alphabetic())?;
+    let (num, unit) = s.split_at(unit_pos);
+    let value: f64 = num.trim().replace(',', ".").parse().ok()?;
+    let mult = match unit.trim().to_ascii_uppercase().as_str() {
+        "B" => 1.0,
+        "KB" => 1024.0,
+        "MB" => 1024.0 * 1024.0,
+        "GB" => 1024.0 * 1024.0 * 1024.0,
+        "TB" => 1024.0_f64.powi(4),
+        _ => return None,
+    };
+    Some(value * mult)
+}
+
+/// Parses a rate string such as `"0 MB/s (limit: 20 MB/s)"` into bytes/second,
+/// ignoring the parenthetical limit and the trailing `/s`.
+fn parse_rate_bps(s: &str) -> Option<f64> {
+    let head = s.split('(').next().unwrap_or(s).trim();
+    let head = head.trim_end_matches("/s").trim_end_matches("/S").trim();
+    parse_size_bytes(head)
+}
+
+/// Parses a leading integer from a string like `"4 client connections"`.
+fn parse_leading_int(s: &str) -> Option<f64> {
+    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    digits.parse().ok()
 }
 
 /// Enumerates tunnels (`list -j`) and, for each one, fetches ports + URLs (`show -j`).
@@ -597,9 +734,69 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        anonymous_ace_args, classify_anonymous_access, classify_user_show, is_auth_error,
-        sanitize_tunnel_id, update_expiration_args,
+        anonymous_ace_args, classify_anonymous_access, classify_install_result, classify_user_show,
+        is_auth_error, parse_leading_int, parse_rate_bps, parse_size_bytes, sanitize_tunnel_id,
+        update_expiration_args, InstallOutcome,
     };
+
+    #[test]
+    fn parse_size_bytes_handles_units_and_locales() {
+        assert_eq!(parse_size_bytes("4402 KB"), Some(4402.0 * 1024.0));
+        assert_eq!(parse_size_bytes("1.5 MB"), Some(1.5 * 1024.0 * 1024.0));
+        // Comma decimal (the CLI localizes numbers, e.g. "28,9 days").
+        assert_eq!(parse_size_bytes("1,5 MB"), Some(1.5 * 1024.0 * 1024.0));
+        assert_eq!(parse_size_bytes("512 B"), Some(512.0));
+        assert_eq!(parse_size_bytes("nonsense"), None);
+    }
+
+    #[test]
+    fn parse_rate_bps_ignores_limit_and_suffix() {
+        assert_eq!(parse_rate_bps("0 MB/s (limit: 20 MB/s)"), Some(0.0));
+        assert_eq!(
+            parse_rate_bps("2.5 MB/s (limit: 20 MB/s)"),
+            Some(2.5 * 1024.0 * 1024.0)
+        );
+        assert_eq!(parse_rate_bps("128 KB/s"), Some(128.0 * 1024.0));
+    }
+
+    #[test]
+    fn parse_leading_int_reads_connection_count() {
+        assert_eq!(parse_leading_int("4 client connections"), Some(4.0));
+        assert_eq!(parse_leading_int("0 client connections"), Some(0.0));
+        assert_eq!(parse_leading_int("no number"), None);
+    }
+
+    #[test]
+    fn install_elevation_detected_from_stderr_or_exit_code() {
+        assert_eq!(
+            classify_install_result(false, Some(1), "Access denied: elevation required"),
+            InstallOutcome::Elevation
+        );
+        assert_eq!(
+            classify_install_result(false, Some(1), "This action requires administrator rights"),
+            InstallOutcome::Elevation
+        );
+        assert_eq!(
+            classify_install_result(false, Some(740), "permission denied"),
+            InstallOutcome::Elevation
+        );
+    }
+
+    #[test]
+    fn install_generic_failure_maps_to_failed_with_trimmed_stderr() {
+        assert_eq!(
+            classify_install_result(false, Some(1), "  no applicable package found  "),
+            InstallOutcome::Failed("no applicable package found".to_string())
+        );
+    }
+
+    #[test]
+    fn install_success_maps_to_installed() {
+        assert_eq!(
+            classify_install_result(true, Some(0), ""),
+            InstallOutcome::Installed
+        );
+    }
 
     #[test]
     fn anonymous_access_detected_on_allow_entry() {

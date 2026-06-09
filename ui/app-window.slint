@@ -50,11 +50,18 @@ export component AppWindow inherits Window {
     in property <string> detail-connections: Strings.metric-na;
     // Most recent captured log lines (oldest first).
     in property <[string]> detail-logs;
+    // Active detail tab (0 = Metrics, 1 = Logs). Held here so it persists across
+    // row-model rebuilds — the panel lives in an `if` that is recreated on each
+    // poll, which would otherwise snap the tab back to Metrics.
+    in-out property <int> detail-active-tab: 0;
 
     // App-level preflight state: "ready" | "cli-missing" | "relogin".
     // Non-ready states show the PreflightBanner above the list. The "relogin"
     // state also covers the expired CLI sign-in case.
     in property <string> app-state: "ready";
+    // True while the CLI install (winget) is running; drives the banner's
+    // "Installing…" + disabled state on the Install CLI button.
+    in property <bool> installing;
 
     // Settings: current "start with Windows" state (set from Rust at startup).
     in-out property <bool> auto-start-enabled;
@@ -64,6 +71,9 @@ export component AppWindow inherits Window {
     // Default expiration for new groups, in whole days (max 30). The CLI "d"
     // suffix is added in Rust; the UI only ever deals in days.
     in-out property <int> default-expiration-days: 30;
+    // Minimum severity shown in the Logs tab ("error"/"warn"/"info"/"debug");
+    // seeded from settings by Rust, edited via the Settings dialog.
+    in-out property <string> log-level: "info";
     // App version string (from Cargo), shown in the About panel.
     in property <string> app-version;
 
@@ -71,6 +81,9 @@ export component AppWindow inherits Window {
     // by Rust when the dialog opens and after install/auto-start actions.
     in property <bool> req-cli-ok;
     in property <bool> req-login-ok;
+    // Logged-in account (e.g. an email), shown next to the "Signed in" row.
+    // Empty when logged out or not yet fetched.
+    in property <string> req-login-account;
     in property <bool> req-installed-ok;
     in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
@@ -86,6 +99,8 @@ export component AppWindow inherits Window {
     // The user edited the probe interval / default expiration in the settings dialog.
     callback probe-interval-changed(int);
     callback default-expiration-changed(int /*days*/);
+    // The user changed the Logs-tab minimum severity in the settings dialog.
+    callback log-level-changed(string);
     // The user toggled dark mode via the top-bar affordance (persist the choice).
     callback theme-changed(bool /*dark*/);
     // The user clicked "Sign in" in the re-login banner.
@@ -143,6 +158,9 @@ export component AppWindow inherits Window {
                     alignment: center;
                     TxtButton {
                         text: Strings.btn-add-port;
+                        // Gated: a management call before the CLI is present and
+                        // signed in would fail with an "Unauthorized" error.
+                        enabled: root.app-state == "ready";
                         clicked => {
                             root.show-add-port = true;
                         }
@@ -153,6 +171,7 @@ export component AppWindow inherits Window {
                     TxtButton {
                         text: Strings.btn-refresh;
                         primary: true;
+                        enabled: root.app-state == "ready";
                         clicked => {
                             root.refresh();
                         }
@@ -192,14 +211,24 @@ export component AppWindow inherits Window {
         // ---- Preflight banner (CLI missing / re-login) — issue #14 ----
         if root.app-state != "ready" : PreflightBanner {
             app-state: root.app-state;
+            installing: root.installing;
             sign-in => {
                 root.sign-in();
+            }
+            install-cli => {
+                root.install-cli();
+            }
+            open-settings => {
+                root.open-settings();
             }
         }
 
         // ---- Group cards / empty state ----
         if root.groups.length == 0 : EmptyState {
             vertical-stretch: 1;
+            // Only offer "+ Create group" once the app is ready; otherwise the
+            // banner's Install CLI / Sign in path is the way forward.
+            can-create: root.app-state == "ready";
             create-group => {
                 root.show-create-group = true;
             }
@@ -222,6 +251,7 @@ export component AppWindow inherits Window {
                     detail-download-rate: root.detail-download-rate;
                     detail-connections: root.detail-connections;
                     detail-logs: root.detail-logs;
+                    detail-active-tab <=> root.detail-active-tab;
                     host => {
                         root.host(g.tunnel-id);
                     }
@@ -253,7 +283,9 @@ export component AppWindow inherits Window {
             HorizontalLayout {
                 padding: Theme.pad;
                 alignment: end;
-                TxtButton {
+                // Hidden until ready: creating a group is a management call that
+                // would fail before the CLI is present and signed in.
+                if root.app-state == "ready" : TxtButton {
                     text: Strings.btn-create-group;
                     primary: true;
                     clicked => {
@@ -315,12 +347,18 @@ export component AppWindow inherits Window {
         default-expiration-changed(days) => {
             root.default-expiration-changed(days);
         }
+        log-level <=> root.log-level;
+        log-level-changed(level) => {
+            root.log-level-changed(level);
+        }
         app-version: root.app-version;
         req-cli-ok: root.req-cli-ok;
         req-login-ok: root.req-login-ok;
+        req-login-account: root.req-login-account;
         req-installed-ok: root.req-installed-ok;
         req-shortcut-ok: root.req-shortcut-ok;
         req-autostart-ok: root.req-autostart-ok;
+        installing: root.installing;
         install-cli => {
             root.install-cli();
         }

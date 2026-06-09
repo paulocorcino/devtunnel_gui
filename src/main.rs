@@ -10,6 +10,7 @@ mod icon_render;
 mod install;
 mod locale;
 mod logbuf;
+mod metrics_store;
 mod model;
 #[cfg(feature = "hosting")]
 mod probe;
@@ -84,6 +85,12 @@ struct LiveState {
     /// Port whose detail panel is expanded, keyed by (tunnel_id, port).
     /// `None` = collapsed; the metrics poll is a no-op while collapsed.
     detail: Option<(String, i32)>,
+    /// True while a `devtunnel show -j` metrics fetch is in flight. Guards the
+    /// poll timer from spawning overlapping subprocesses (the CLI is a .NET tool
+    /// and slow to start, so unguarded ticks piled up under any latency). Dormant
+    /// in v0.1.0 — the poll timer that reads it is disabled for stability.
+    #[allow(dead_code)]
+    metrics_inflight: bool,
     /// Optimistic hidden-delete keys for in-flight delete operations.
     /// `(tunnel_id, None)` hides the whole group; `(tunnel_id, Some(port))` hides one port.
     hidden: HashSet<(String, Option<i32>)>,
@@ -187,34 +194,13 @@ fn derive_host_state(state: &LiveState, tunnel_id: &str, host_connections: i64) 
 
 fn main() -> anyhow::Result<()> {
     // Install the capturing logger in every build: it tees records to stderr
-    // (what env_logger used to print in the hosting build) and into the ring
-    // buffer behind the Logs tab. Default to debug for our crate + info for the
-    // tunnels SDK; override with RUST_LOG (e.g. `devtunnel_gui=trace`).
-    let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=debug,tunnels=info").install();
-
-    // Relocation handshake: when launched by a just-installed copy with
-    // `--relocated-from <path>`, delete the portable original we were moved from.
-    // Runs on a detached thread because the delete retries for up to ~3 s while
-    // the previous process exits and releases the file lock — never block startup.
-    #[cfg(windows)]
-    {
-        let mut args = std::env::args().skip(1);
-        while let Some(a) = args.next() {
-            if a == install::RELOCATED_FROM_FLAG {
-                match args.next() {
-                    Some(old) => {
-                        std::thread::spawn(move || {
-                            install::cleanup_relocated(std::path::Path::new(&old));
-                        });
-                    }
-                    None => log::warn!(
-                        "install: {} given with no path",
-                        install::RELOCATED_FROM_FLAG
-                    ),
-                }
-            }
-        }
-    }
+    // (what env_logger used to print in the hosting build).
+    // Stability (v0.1.0): the tunnels SDK logs per-connection events at info on
+    // the relay's own threads; routing that volume through a synchronous logger
+    // stalled the host under traffic. Default the SDK to `warn` (only real
+    // problems) and our crate to `info`. Override with RUST_LOG when debugging
+    // (e.g. `RUST_LOG=devtunnel_gui=debug,tunnels=info`).
+    let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=info,tunnels=warn").install();
 
     // winit registers the window class with a null icon, so the title bar and
     // taskbar would show the generic default. Install the winit backend with a
@@ -264,6 +250,10 @@ fn main() -> anyhow::Result<()> {
 
     // Preflight results (startup probe + after sign-in) pumped to the UI thread.
     let (pf_tx, pf_rx) = std::sync::mpsc::channel::<devtunnel::Preflight>();
+
+    // CLI install (winget) outcomes pumped to the UI thread so the banner can
+    // clear "Installing…" and surface a clear success / failure / elevation result.
+    let (install_tx, install_rx) = std::sync::mpsc::channel::<devtunnel::InstallOutcome>();
 
     // Selected-port metrics results, tagged with (tunnel_id, port) so the pump
     // can drop results that arrive after the selection changed.
@@ -343,25 +333,19 @@ fn main() -> anyhow::Result<()> {
         });
     }
     // ---- Settings: install the Dev Tunnels CLI on demand (winget + fallback) ----
+    // The callback runs on the UI thread: flag "installing" so the banner shows
+    // "Installing…" + disables the button, then run winget off-thread and pump the
+    // classified outcome back to the UI pump (which clears the flag and surfaces it).
     {
-        let pf_tx = pf_tx.clone();
+        let weak = app.as_weak();
+        let install_tx = install_tx.clone();
         app.on_install_cli(move || {
-            let pf_tx = pf_tx.clone();
-            std::thread::spawn(move || match devtunnel::install_cli() {
-                // Re-run preflight so the banner + requirements rows update.
-                Ok(true) => {
-                    let _ = pf_tx.send(devtunnel::preflight());
-                }
-                // winget unavailable — open the official install page instead.
-                Ok(false) => {
-                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
-                }
-                // winget ran but failed: log it and fall back to the install page
-                // so the user who clicked the button still gets somewhere to go.
-                Err(e) => {
-                    log::warn!("install_cli: {e}");
-                    let _ = open::that(devtunnel::CLI_INSTALL_URL);
-                }
+            if let Some(a) = weak.upgrade() {
+                a.set_installing(true);
+            }
+            let install_tx = install_tx.clone();
+            std::thread::spawn(move || {
+                let _ = install_tx.send(devtunnel::install_cli());
             });
         });
     }
@@ -372,6 +356,7 @@ fn main() -> anyhow::Result<()> {
         let st = app_state.borrow();
         app.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
         app.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
+        app.set_log_level(st.settings.log_level.clone().into());
     }
 
     // ---- Dark mode (persisted; falls back to the Windows app theme) ----
@@ -418,6 +403,22 @@ fn main() -> anyhow::Result<()> {
         });
     }
     {
+        // Persist the chosen Logs-tab severity and re-apply it to the open panel
+        // immediately so the filter takes effect without reopening the detail.
+        let app_state = app_state.clone();
+        let weak = app.as_weak();
+        app.on_log_level_changed(move |level| {
+            {
+                let mut st = app_state.borrow_mut();
+                st.settings.log_level = level.to_string();
+                st.save();
+            }
+            if let Some(a) = weak.upgrade() {
+                refresh_logs(&a, &app_state);
+            }
+        });
+    }
+    {
         // Re-sync the toggle from the registry each time the Settings dialog
         // opens, in case the Run entry changed out of band, then show it.
         let weak = app.as_weak();
@@ -435,8 +436,19 @@ fn main() -> anyhow::Result<()> {
                 let st = app_state.borrow();
                 a.set_probe_interval_secs(st.settings.probe_interval_secs as i32);
                 a.set_default_expiration_days(expiration_days(&st.settings.default_expiration));
+                a.set_log_level(st.settings.log_level.clone().into());
                 a.set_show_settings(true);
             }
+            // Fetch the logged-in account off the UI thread (subprocess call) and
+            // fill the "Signed in as …" label when it lands. Best-effort: an empty
+            // result leaves the row showing the plain "Signed in" label.
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let account = devtunnel::current_username().unwrap_or_default();
+                let _ = weak.upgrade_in_event_loop(move |a| {
+                    a.set_req_login_account(account.into());
+                });
+            });
         });
     }
     // ---- Settings: uninstall (remove shortcut + auto-start, then self-delete) ----
@@ -742,6 +754,7 @@ fn main() -> anyhow::Result<()> {
         let state = state.clone();
         let loc = loc.clone();
         let metrics_tx = metrics_tx.clone();
+        let app_state = app_state.clone();
         app.on_toggle_detail(move |index, tunnel_id, port| {
             let tid = tunnel_id.to_string();
             let mut st = state.borrow_mut();
@@ -752,44 +765,60 @@ fn main() -> anyhow::Result<()> {
             if same {
                 // Collapse: clear the selection; the poll timer goes idle.
                 st.detail = None;
+                st.metrics_inflight = false;
                 drop(st);
                 if let Some(a) = weak.upgrade() {
                     a.set_selected_index(-1);
                 }
             } else {
                 st.detail = Some((tid.clone(), port));
+                // One fetch starts now; the guard blocks the timer from piling on.
+                st.metrics_inflight = true;
                 drop(st);
                 if let Some(a) = weak.upgrade() {
                     a.set_selected_index(index);
                     // Show "n/a" until the first poll lands; logs straight away.
                     apply_metrics(&a, None, &loc);
-                    refresh_logs(&a);
+                    refresh_logs(&a, &app_state);
                 }
                 spawn_metrics_fetch(&metrics_tx, tid, port);
             }
         });
     }
 
-    // ---- Port detail polling: refresh metrics + logs while a panel is open ----
-    // A no-op while collapsed (detail == None), so no CLI calls are wasted.
-    let detail_timer = slint::Timer::default();
-    {
-        let weak = app.as_weak();
-        let state = state.clone();
-        let metrics_tx = metrics_tx.clone();
-        detail_timer.start(
-            slint::TimerMode::Repeated,
-            Duration::from_secs(3),
-            move || {
-                let selected = state.borrow().detail.clone();
-                let Some((tid, port)) = selected else { return };
-                spawn_metrics_fetch(&metrics_tx, tid, port);
-                if let Some(a) = weak.upgrade() {
-                    refresh_logs(&a);
-                }
-            },
-        );
-    }
+    // ---- Port detail polling: DISABLED for stability (v0.1.0) ----
+    // The periodic metrics fetch spawned a `devtunnel show -j` subprocess and the
+    // log refresh snapshotted the ring on every tick. Both are turned off while we
+    // focus on host stability; the detail panel itself is disabled in the UI
+    // (PortRow.expandable = false) so nothing here ever runs. Re-enable together
+    // with the panel when metrics/logs return (see docs/backlogs/metrics-chart).
+    //
+    // let detail_timer = slint::Timer::default();
+    // {
+    //     let weak = app.as_weak();
+    //     let state = state.clone();
+    //     let metrics_tx = metrics_tx.clone();
+    //     let app_state = app_state.clone();
+    //     detail_timer.start(
+    //         slint::TimerMode::Repeated,
+    //         Duration::from_secs(5),
+    //         move || {
+    //             let selected = state.borrow().detail.clone();
+    //             let Some((tid, port)) = selected else { return };
+    //             let Some(a) = weak.upgrade() else { return };
+    //             // Logs are free to refresh; do it regardless of the active tab.
+    //             refresh_logs(&a, &app_state);
+    //             // Only poll metrics on the Metrics tab (0), and only if the last
+    //             // fetch already returned.
+    //             let on_metrics_tab = a.get_detail_active_tab() == 0;
+    //             let busy = state.borrow().metrics_inflight;
+    //             if on_metrics_tab && !busy {
+    //                 state.borrow_mut().metrics_inflight = true;
+    //                 spawn_metrics_fetch(&metrics_tx, tid, port);
+    //             }
+    //         },
+    //     );
+    // }
 
     // ---- Pump events (tray + load results) into the Slint loop via Timer ----
     let menu_rx = MenuEvent::receiver();
@@ -806,6 +835,7 @@ fn main() -> anyhow::Result<()> {
         let auto_resume_pending = auto_resume_pending.clone();
         let renew_pending = renew_pending.clone();
         let tx = tx.clone();
+        let pf_tx = pf_tx.clone();
         timer.start(
             slint::TimerMode::Repeated,
             Duration::from_millis(150),
@@ -828,6 +858,39 @@ fn main() -> anyhow::Result<()> {
                         toggle_window(&weak);
                     }
                 }
+                // CLI install outcomes -> clear "Installing…" and surface a
+                // clear result instead of swallowing failures.
+                while let Ok(outcome) = install_rx.try_recv() {
+                    if let Some(a) = weak.upgrade() {
+                        a.set_installing(false);
+                        match outcome {
+                            // Re-run preflight so the banner + requirements rows
+                            // advance to the next gate (sign-in / ready).
+                            devtunnel::InstallOutcome::Installed => {
+                                a.set_status(loc.t("install-status-done").into());
+                                let _ = pf_tx.send(devtunnel::preflight());
+                            }
+                            // winget unavailable — open the manual install page.
+                            devtunnel::InstallOutcome::WingetMissing => {
+                                a.set_status(loc.t("install-status-winget-missing").into());
+                                let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                            }
+                            // Needs admin: surface it and fall back to the page.
+                            devtunnel::InstallOutcome::Elevation => {
+                                a.set_status(loc.t("install-status-elevation").into());
+                                let _ = open::that(devtunnel::CLI_INSTALL_URL);
+                            }
+                            // Any other failure: show the trimmed winget stderr.
+                            devtunnel::InstallOutcome::Failed(e) => {
+                                log::warn!("install_cli: {e}");
+                                let mut args = FluentArgs::new();
+                                args.set("message", e);
+                                a.set_status(loc.t_args("install-status-failed", &args).into());
+                            }
+                        }
+                    }
+                }
+
                 // Preflight results -> set app-state, swap the tray icon, and
                 // kick the initial load when the environment is ready.
                 while let Ok(pf) = pf_rx.try_recv() {
@@ -874,6 +937,8 @@ fn main() -> anyhow::Result<()> {
 
                 // Selected-port metrics -> detail panel (skip stale selections).
                 while let Ok((tid, port, result)) = metrics_rx.try_recv() {
+                    // This fetch is done — let the timer schedule the next one.
+                    state.borrow_mut().metrics_inflight = false;
                     let current = state
                         .borrow()
                         .detail
@@ -882,6 +947,16 @@ fn main() -> anyhow::Result<()> {
                     if !current {
                         continue;
                     }
+                    // Metrics sample persistence DISABLED for stability (v0.1.0):
+                    // no metrics are fetched while the detail panel is off, so
+                    // nothing arrives here. Re-enable with the detail polling.
+                    // if let Ok(m) = &result {
+                    //     if let Ok(now) = std::time::SystemTime::now()
+                    //         .duration_since(std::time::UNIX_EPOCH)
+                    //     {
+                    //         metrics_store::append(&tid, port, m, now.as_secs());
+                    //     }
+                    // }
                     if let Some(a) = weak.upgrade() {
                         // Errors (port deleted, CLI hiccup) degrade to "n/a".
                         apply_metrics(&a, result.ok().as_ref(), &loc);
@@ -1120,12 +1195,10 @@ fn enable_auto_start(app_state: &Rc<RefCell<state::AppState>>) {
         st.settings.auto_start = true;
         st.save();
     }
-    if let Ok(old) = std::env::current_exe() {
-        if install::relaunch_from(&new_exe, &old).is_ok() {
-            std::process::exit(0);
-        }
-        log::warn!("install: relaunch from new location failed; staying in place");
+    if install::relaunch_installed(&new_exe).is_ok() {
+        std::process::exit(0);
     }
+    log::warn!("install: relaunch from new location failed; staying in place");
 }
 
 /// Uninstalls the app: removes the Start-menu shortcut, disables start-with-
@@ -1336,10 +1409,6 @@ fn apply_rows(
 
     match result {
         Ok(rows) => {
-            // Count real ports only: a portless group is carried as a `port == 0`
-            // row, which must not inflate the header's port tally.
-            let count = rows.iter().filter(|r| r.port != 0).count();
-
             // Build the group picker (deduped by Real Tunnel ID, order preserved);
             // append the "+ New group…" entry last with an empty id.
             let mut group_names: Vec<SharedString> = Vec::new();
@@ -1361,7 +1430,10 @@ fn apply_rows(
             // Also persist the rows so the next startup paints immediately.
             state::save_row_cache(&rows);
             state.borrow_mut().rows = rows;
-            rebuild_rows(&app, tray, actions, state, loc);
+            // The header chip counts the ports actually rendered into the cards
+            // (returned by rebuild_rows), not raw `rows`: an optimistically-hidden
+            // or stale port must not inflate the chip while its card shows portless.
+            let count = rebuild_rows(&app, tray, actions, state, loc);
 
             let mut args = FluentArgs::new();
             args.set("count", count as i64);
@@ -1391,14 +1463,22 @@ fn apply_rows(
 /// `status` and each group's `hosting` flag derive from the latest probe/host
 /// events. Runs on the UI thread (after a load, or when a host/probe event
 /// updates derived state).
+///
+/// Returns the number of real service ports actually rendered into the cards
+/// (excludes portless groups, optimistically-hidden ports, and provisioning
+/// placeholders). The header chip is set from this so it can never disagree with
+/// what the cards show — counting raw `rows` instead let a hidden/stale port
+/// inflate the chip while the card showed the group as portless.
 fn rebuild_rows(
     app: &AppWindow,
     tray: &tray_icon::TrayIcon,
     actions: &Rc<RefCell<HashMap<MenuId, Action>>>,
     state: &Rc<RefCell<LiveState>>,
     loc: &Rc<Locale>,
-) {
+) -> usize {
     let st = state.borrow();
+    // Count of real service ports rendered into the cards; returned for the header.
+    let mut rendered_ports = 0usize;
     // Build a flat index space first: every visible (non-hidden) real port gets a
     // stable `row-index` used to key the expandable detail panel (issue #17). The
     // same index drives `selected-index` so the open panel survives reloads.
@@ -1445,6 +1525,7 @@ fn rebuild_rows(
         // drops the port row until the reflush refresh confirms the deletion.
         if r.port != 0 && !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port))) {
             groups[gi].has_port = true;
+            rendered_ports += 1;
             ports[gi].push(PortView {
                 port: r.port,
                 protocol: r.protocol.clone().into(),
@@ -1530,6 +1611,7 @@ fn rebuild_rows(
     if stale_detail {
         state.borrow_mut().detail = None;
     }
+    rendered_ports
 }
 
 /// Fires a `fetch_port_status` for the selected port on a background thread;
@@ -1593,9 +1675,11 @@ fn apply_metrics(app: &AppWindow, metrics: Option<&devtunnel::PortMetrics>, loc:
     app.set_detail_connections(count(metrics.and_then(|m| m.connection_count)));
 }
 
-/// Refreshes the Logs tab model from the capture ring buffer (oldest first).
-fn refresh_logs(app: &AppWindow) {
-    let lines: Vec<SharedString> = logbuf::snapshot()
+/// Refreshes the Logs tab model from the capture ring buffer (oldest first),
+/// filtered to the user-chosen minimum severity from Settings.
+fn refresh_logs(app: &AppWindow, app_state: &Rc<RefCell<state::AppState>>) {
+    let level = state::parse_log_level(&app_state.borrow().settings.log_level);
+    let lines: Vec<SharedString> = logbuf::snapshot(level)
         .into_iter()
         .map(SharedString::from)
         .collect();
@@ -1720,6 +1804,11 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_banner_relogin_title(loc.t("banner-relogin-title").into());
     s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
     s.set_btn_sign_in(loc.t("btn-sign-in").into());
+    s.set_banner_action_open_settings(loc.t("banner-action-open-settings").into());
+    s.set_install_status_running(loc.t("install-status-running").into());
+    s.set_install_status_done(loc.t("install-status-done").into());
+    s.set_install_status_elevation(loc.t("install-status-elevation").into());
+    s.set_install_status_winget_missing(loc.t("install-status-winget-missing").into());
 
     // Dialog — add port
     s.set_dlg_add_port_title(loc.t("dlg-add-port-title").into());
@@ -1729,10 +1818,16 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_new_group_option(loc.t("new-group-option").into());
     s.set_ph_port(loc.t("ph-port").into());
 
+    // Dialog — inline validation messages
+    s.set_err_field_name_required(loc.t("err-field-name-required").into());
+    s.set_err_field_port_required(loc.t("err-field-port-required").into());
+    s.set_err_field_port_range(loc.t("err-field-port-range").into());
+
     // Settings — requirements checklist
     s.set_req_title(loc.t("req-title").into());
     s.set_req_cli(loc.t("req-cli").into());
     s.set_req_login(loc.t("req-login").into());
+    s.set_req_login_as(loc.t("req-login-as").into());
     s.set_req_installed(loc.t("req-installed").into());
     s.set_req_shortcut(loc.t("req-shortcut").into());
     s.set_req_autostart(loc.t("req-autostart").into());
@@ -1741,9 +1836,17 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
 
     // Settings
     s.set_settings_title(loc.t("settings-title").into());
+    s.set_settings_section_general(loc.t("settings-section-general").into());
+    s.set_settings_section_status(loc.t("settings-section-status").into());
+    s.set_settings_section_about(loc.t("settings-section-about").into());
     s.set_field_auto_start(loc.t("field-auto-start").into());
     s.set_field_probe_interval(loc.t("field-probe-interval").into());
     s.set_field_default_expiration(loc.t("field-default-expiration").into());
+    s.set_field_log_level(loc.t("field-log-level").into());
+    s.set_log_level_error(loc.t("log-level-error").into());
+    s.set_log_level_warn(loc.t("log-level-warn").into());
+    s.set_log_level_info(loc.t("log-level-info").into());
+    s.set_log_level_debug(loc.t("log-level-debug").into());
     s.set_btn_close(loc.t("btn-close").into());
     s.set_btn_uninstall(loc.t("btn-uninstall").into());
     s.set_confirm_uninstall(loc.t("confirm-uninstall").into());

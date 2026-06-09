@@ -54,10 +54,11 @@ pub struct PortDetail {
     /// The real Public URL. Comes from `show`; cannot be constructed manually.
     #[serde(default)]
     pub port_uri: Option<String>,
-    /// Live traffic/connection metrics. Only present (as an object) while the
-    /// port is hosted; when idle the CLI returns `status` as a plain summary
-    /// string (e.g. `"0 client connections"`), so [`flex_status`] degrades any
-    /// non-object shape to `None` instead of failing the whole row.
+    /// Per-port summary. In practice the CLI returns this as a plain string
+    /// (e.g. `"4 client connections"`), not a metrics object — live traffic
+    /// totals/rates live at the tunnel level (see `devtunnel::fetch_port_status`,
+    /// which reads them directly). [`flex_status`] keeps tolerating an object
+    /// shape so a future CLI change cannot drop the whole row.
     #[serde(default, deserialize_with = "flex_status")]
     pub status: Option<PortStatus>,
 }

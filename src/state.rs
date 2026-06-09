@@ -28,6 +28,9 @@ pub struct Settings {
     /// Dark-mode preference. `None` = follow the Windows app theme (first run);
     /// `Some(_)` = the user picked a mode via the top-bar toggle, persisted.
     pub dark: Option<bool>,
+    /// Minimum severity shown in the port-detail Logs tab: one of
+    /// `error`/`warn`/`info`/`debug`. Defaults to `info` (Debug chatter hidden).
+    pub log_level: String,
 }
 
 impl Default for Settings {
@@ -40,7 +43,20 @@ impl Default for Settings {
             default_expiration: "30d".to_string(),
             // First run follows the OS theme until the user chooses explicitly.
             dark: None,
+            // Show info and above by default; users can widen to debug.
+            log_level: "info".to_string(),
         }
+    }
+}
+
+/// Parses a persisted [`Settings::log_level`] string into a `LevelFilter`,
+/// falling back to `Info` for unknown values.
+pub fn parse_log_level(s: &str) -> log::LevelFilter {
+    match s.to_ascii_lowercase().as_str() {
+        "error" => log::LevelFilter::Error,
+        "warn" => log::LevelFilter::Warn,
+        "debug" => log::LevelFilter::Debug,
+        _ => log::LevelFilter::Info,
     }
 }
 

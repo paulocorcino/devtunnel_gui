@@ -36,6 +36,9 @@ export component GroupCard inherits Rectangle {
     in property <string> detail-connections;
     // Most recent captured log lines (oldest first).
     in property <[string]> detail-logs;
+    // Active detail tab (0 = Metrics, 1 = Logs), hoisted to AppWindow so it
+    // survives row-model rebuilds (otherwise it resets to Metrics on each poll).
+    in-out property <int> detail-active-tab;
     callback host();
     callback stop();
     callback copy-url(string);
@@ -172,6 +175,7 @@ export component GroupCard inherits Rectangle {
                     download-rate: root.detail-download-rate;
                     connections: root.detail-connections;
                     log-lines: root.detail-logs;
+                    active-tab <=> root.detail-active-tab;
                 }
             }
         }

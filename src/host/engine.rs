@@ -186,7 +186,15 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
         );
 
         match connect_once(&tunnel_id, &ports).await {
-            Ok(handle) => {
+            // `_host` (the `RelayTunnelHost`) MUST stay bound for the whole
+            // connection: it owns the `ports_tx` watch::Sender that every
+            // client's `run_stream` task waits on. The SDK's `run_stream`
+            // ignores the `Result` from `ports.changed()`, so once that sender
+            // is dropped, `changed()` returns `Err` forever and each task spins
+            // a CPU core (observed: ~2.5 cores pegged → freeze under client
+            // churn). Holding `_host` until reconnect/stop keeps the sender
+            // alive so those tasks stay parked instead of busy-looping.
+            Ok((_host, handle)) => {
                 backoff = RECONNECT_BACKOFF_START;
                 first_attempt = false;
                 emit(&events, &tunnel_id, HostState::Hosting);
@@ -203,6 +211,9 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
                         // the loop reconnects with freshly minted tokens.
                     }
                 }
+                // `_host` and the unfinished `handle` both drop here on the way
+                // to reconnect, tearing down the relay session so old
+                // `run_stream` tasks exit via their stream-closed arm.
             }
             Err(e) => {
                 let msg = e.to_string();
@@ -231,10 +242,15 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
 /// One connect attempt: mint fresh tokens, build the client, connect, add ports.
 /// `Locale` is rebuilt here because it is not `Send` across the `await` points of
 /// the host task.
+///
+/// Returns the live [`RelayTunnelHost`] **and** its [`RelayHandle`]. The caller
+/// must keep the host bound for the lifetime of the connection: it owns the
+/// `ports_tx` watch::Sender that the SDK's per-client `run_stream` tasks wait on,
+/// and dropping it early makes those tasks busy-loop (see [`host_group`]).
 async fn connect_once(
     tunnel_id: &str,
     ports: &[u16],
-) -> anyhow::Result<tunnels::connections::RelayHandle> {
+) -> anyhow::Result<(RelayTunnelHost, tunnels::connections::RelayHandle)> {
     let loc = Locale::load(&system_locale());
 
     log::debug!("connect_once[{tunnel_id}]: minting host token");
@@ -269,7 +285,7 @@ async fn connect_once(
         log::info!("connect_once[{tunnel_id}]: port {port} forwarded");
     }
 
-    Ok(handle)
+    Ok((host, handle))
 }
 
 /// Sends a state transition to the UI, ignoring a closed channel (UI gone).
