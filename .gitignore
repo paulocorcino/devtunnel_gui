@@ -35,3 +35,8 @@ docs/plans/logs/
 __pycache__/
 # Ralphy run artifacts (scratch, logs, per-run plans)
 .ralphy/
+
+# Profiling artifacts (samply captures + symbol sidecars) — large binaries,
+# kept locally for analysis only, never versioned.
+profile*.json.gz
+*.json.syms.json
