@@ -1082,17 +1082,45 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(feature = "hosting")]
                 let mut probe_changed = false;
                 #[cfg(feature = "hosting")]
-                while let Ok(probe::ProbeEvent::Status {
-                    tunnel_id,
-                    port,
-                    state: ps,
-                }) = probe_evt_rx.try_recv()
-                {
-                    state
-                        .borrow_mut()
-                        .probe
-                        .insert((tunnel_id, port), map_probe_state(&ps).to_string());
-                    probe_changed = true;
+                while let Ok(ev) = probe_evt_rx.try_recv() {
+                    match ev {
+                        probe::ProbeEvent::Status {
+                            tunnel_id,
+                            port,
+                            state: ps,
+                        } => {
+                            state
+                                .borrow_mut()
+                                .probe
+                                .insert((tunnel_id, port), map_probe_state(&ps).to_string());
+                            probe_changed = true;
+                        }
+                        // Zombie-tunnel instrumentation (issue #37): the probe found the
+                        // Public URL unreachable while the local port is up. That is a
+                        // zombie only if the engine still believes the group is Hosting
+                        // (its RelayHandle never resolved); otherwise it is an ordinary
+                        // drop the engine is already reconnecting. Log/flag only — no
+                        // behaviour change. The recorded occurrences feed the #37
+                        // go/no-go and, once that gates open, the #39 reconnect bridge.
+                        probe::ProbeEvent::PublicUnreachable { tunnel_id, port } => {
+                            let hosting = matches!(
+                                state.borrow().host.get(&tunnel_id).map(String::as_str),
+                                Some("hosting")
+                            );
+                            if hosting {
+                                log::warn!(
+                                    "zombie-tunnel suspect: {tunnel_id} port {port} — Public URL \
+                                     unreachable while the local port is listening and the engine \
+                                     state is Hosting (RelayHandle not resolved)"
+                                );
+                            } else {
+                                log::debug!(
+                                    "probe: {tunnel_id} port {port} Public URL unreachable but the \
+                                     engine is not Hosting — ordinary drop, not a zombie"
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // Re-point the probe at the currently-hosting groups' URLs whenever

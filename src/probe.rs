@@ -54,6 +54,15 @@ pub enum ProbeEvent {
         port: i32,
         state: ProbeState,
     },
+    /// Zombie-tunnel signal (issue #37): the HTTP fallback found the **Public URL
+    /// unreachable** (network error/timeout) while the **local port is still
+    /// listening**. [`combine`] deliberately reports this as `Operational` (a
+    /// transient WAN hiccup is not a service outage), so this discrepancy is
+    /// surfaced separately rather than folded into the badge. It is only the
+    /// *probe half* of the zombie signature: the wiring layer logs/acts on it
+    /// solely when the host engine still believes the group is `Hosting` (the
+    /// relay's `RelayHandle` never resolved). Emitted at the slow HTTP cadence.
+    PublicUnreachable { tunnel_id: String, port: i32 },
 }
 
 /// Commands sent to the probe thread.
@@ -231,6 +240,16 @@ pub fn spawn(events: Sender<ProbeEvent>) -> Sender<ProbeCommand> {
                             Err(ureq::Error::Status(code, _)) => Some(code),
                             Err(_) => None,
                         };
+                        // Zombie signature (probe half): the Public URL is unreachable
+                        // (network error) yet the local upstream is listening. `combine`
+                        // swallows this as Operational, so surface it for the wiring
+                        // layer to correlate against the engine's `Hosting` state (#37).
+                        if status.is_none() && tcp_listening {
+                            let _ = events.send(ProbeEvent::PublicUnreachable {
+                                tunnel_id: target.tunnel_id.clone(),
+                                port: target.port,
+                            });
+                        }
                         if let Some(slot) = http_cache.get_mut(i) {
                             *slot = Some(status);
                         }
