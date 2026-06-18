@@ -15,6 +15,13 @@
 
 use std::sync::mpsc::Sender;
 
+// The pure keep-alive state machine (issue #35) lives in `keepalive.rs`. It has
+// zero SDK deps, so it is declared unconditionally — its tests run under a plain
+// `cargo test` without the vendored-OpenSSL toolchain. The `#![allow(dead_code)]`
+// above keeps the items it exposes but the default build never calls from
+// warning.
+mod keepalive;
+
 // The real SDK-backed engine (connect/keep-alive/stop) lives in `engine.rs` and
 // is compiled only with `--features hosting`.
 #[cfg(feature = "hosting")]
