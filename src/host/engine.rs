@@ -287,6 +287,11 @@ async fn host_group(
         // Execute the policy's decision for the next (re)connect attempt.
         match action {
             Action::Sleep(d) => tokio::time::sleep(d).await,
+            // `Reconnect` (zombie watchdog, issue #39) reconnects now with no
+            // sleep — the loop falls straight back to `connect_once`. It is only
+            // emitted once the public probe is wired into the keep-alive `select!`
+            // (gated on the #37 go-decision); until then it is never produced here.
+            Action::Reconnect => {}
             // `Await` only follows a `Connected` event, which the Ok arm
             // overwrites with the keep-alive outcome before reaching here;
             // `Relogin`/`Fail` return in the Err arm above. None are reachable.
