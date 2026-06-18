@@ -10,8 +10,11 @@
 //! Observability: every [`host::HostEvent`] is written as one JSON line on
 //! stdout (logs stay on stderr via the capturing logger), so an external process
 //! can observe state transitions deterministically. Control: it reads simple
-//! line commands on stdin — `stop <id>`, `stop` (all groups), `quit` (stop all
-//! and exit). EOF on stdin is treated as `quit`.
+//! line commands on stdin — `host <id>` (re-host), `stop <id>`, `stop` (all
+//! groups), `drop <id>` (force a relay drop + reconnect without tearing the
+//! group down — exercises the reconnect / token-reuse path of issue #47
+//! deterministically, no firewall/admin needed), and `quit` (stop all and exit).
+//! EOF on stdin is treated as `quit`.
 //!
 //! Only the `--features hosting` build has a real engine; the default build's
 //! `NoopHost` makes this a no-op, which keeps the module compiling everywhere.
@@ -28,6 +31,9 @@ enum Ctl {
     Host(String),
     /// Stop one group by Real Tunnel ID.
     Stop(String),
+    /// Force one group's relay to drop and reconnect without tearing it down
+    /// (exercises the real reconnect / token-reuse path; issue #47).
+    Drop(String),
     /// Stop every hosted group.
     StopAll,
     /// Stop everything and exit.
@@ -77,6 +83,8 @@ pub fn run(ids_csv: &str) -> anyhow::Result<()> {
                 Ctl::StopAll
             } else if let Some(rest) = line.strip_prefix("stop ") {
                 Ctl::Stop(rest.trim().to_owned())
+            } else if let Some(rest) = line.strip_prefix("drop ") {
+                Ctl::Drop(rest.trim().to_owned())
             } else if let Some(rest) = line.strip_prefix("host ") {
                 Ctl::Host(rest.trim().to_owned())
             } else {
@@ -104,6 +112,7 @@ pub fn run(ids_csv: &str) -> anyhow::Result<()> {
         match ctl_rx.recv_timeout(Duration::from_millis(100)) {
             Ok(Ctl::Host(id)) => host.send(HostCommand::Host { tunnel_id: id }),
             Ok(Ctl::Stop(id)) => host.send(HostCommand::Stop { tunnel_id: id }),
+            Ok(Ctl::Drop(id)) => host.send(HostCommand::DropRelay { tunnel_id: id }),
             Ok(Ctl::StopAll) => stop_all(host.as_ref(), &ids),
             Ok(Ctl::Quit) => {
                 stop_all(host.as_ref(), &ids);

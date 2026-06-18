@@ -66,6 +66,12 @@ pub enum HostCommand {
     Host { tunnel_id: String },
     /// Stop hosting the given group; its definition is left intact.
     Stop { tunnel_id: String },
+    /// Diagnostic: force the group's live relay connection to drop and reconnect,
+    /// *without* tearing the group down — exercises the real reconnect path
+    /// (including token reuse, issue #47) deterministically and without a network
+    /// outage / firewall block. Emitted only by the headless test runner; the GUI
+    /// never sends it.
+    DropRelay { tunnel_id: String },
 }
 
 /// An event emitted by the host engine for the UI to consume.

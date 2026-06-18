@@ -57,11 +57,13 @@ pub fn start(events: Sender<HostEvent>) -> std::sync::mpsc::Sender<HostCommand> 
 }
 
 /// Handle to a per-group worker thread: its join handle (used only to check
-/// liveness on a repeat `Host`) and a cancellation [`Notify`] that, when
-/// signalled, ends the group's `block_on` so its runtime drops.
+/// liveness on a repeat `Host`), a cancellation [`Notify`] that ends the group's
+/// `block_on` so its runtime drops, and a `drop_relay` [`Notify`] that forces a
+/// reconnect without tearing the group down (diagnostic, issue #47).
 struct GroupHandle {
     thread: std::thread::JoinHandle<()>,
     cancel: Arc<Notify>,
+    drop_relay: Arc<Notify>,
 }
 
 /// Engine command loop. Runs on its own OS thread with no async runtime of its
@@ -108,6 +110,16 @@ fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<HostEvent>
                 }
                 emit(&events, &tunnel_id, HostState::Stopped);
             }
+            HostCommand::DropRelay { tunnel_id } => {
+                // Force the live group to reconnect (it sees a RelayDropped) while
+                // staying hosted. Ignored if the group is gone or not yet up.
+                if let Some(group) = groups.get(&tunnel_id) {
+                    if !group.thread.is_finished() {
+                        log::debug!("host engine: forcing relay drop for {tunnel_id}");
+                        group.drop_relay.notify_one();
+                    }
+                }
+            }
         }
     }
 }
@@ -125,6 +137,8 @@ fn spawn_group(
 ) -> GroupHandle {
     let cancel = Arc::new(Notify::new());
     let cancel_signal = cancel.clone();
+    let drop_relay = Arc::new(Notify::new());
+    let drop_signal = drop_relay.clone();
 
     let thread = std::thread::Builder::new()
         .name(format!("devtunnel-host-{tunnel_id}"))
@@ -143,21 +157,30 @@ fn spawn_group(
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async {
                 tokio::select! {
-                    _ = host_group(tunnel_id, ports, events) => {}
+                    _ = host_group(tunnel_id, ports, events, drop_signal) => {}
                     _ = cancel_signal.notified() => {}
                 }
             });
         })
         .expect("spawning a per-group host thread should not fail");
 
-    GroupHandle { thread, cancel }
+    GroupHandle {
+        thread,
+        cancel,
+        drop_relay,
+    }
 }
 
 /// Long-running host task for one group: connect → add ports → keep alive, with
 /// reconnect-on-drop and periodic token re-mint. Loops forever; the caller's
 /// `select!` ends it when the group is cancelled (Stop). Returns early only on an
 /// unrecoverable error (e.g. expired sign-in).
-async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender<HostEvent>) {
+async fn host_group(
+    tunnel_id: String,
+    ports: Vec<(u16, String)>,
+    events: Sender<HostEvent>,
+    drop_relay: Arc<Notify>,
+) {
     use super::keepalive::{Action, ConnEvent, ConnFailure, KeepAliveState, Phase};
 
     let mut state = KeepAliveState::new();
@@ -195,7 +218,8 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
                 cached = Some(tokens);
                 emit(&events, &tunnel_id, HostState::Hosting);
 
-                // Keep alive until the relay drops or the re-mint timer fires.
+                // Keep alive until the relay drops, the re-mint timer fires, or a
+                // diagnostic `DropRelay` forces a reconnect (issue #47).
                 let event = tokio::select! {
                     r = handle => {
                         log::warn!("host engine: {tunnel_id} relay disconnected: {r:?}");
@@ -204,6 +228,10 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
                     _ = tokio::time::sleep(super::keepalive::REMINT_AFTER) => {
                         log::info!("host engine: {tunnel_id} re-minting tokens before expiry");
                         ConnEvent::RemintDue
+                    }
+                    _ = drop_relay.notified() => {
+                        log::info!("host engine: {tunnel_id} forced relay drop (diagnostic)");
+                        ConnEvent::RelayDropped
                     }
                 };
                 // A re-mint must discard the cache so the next attempt mints fresh
