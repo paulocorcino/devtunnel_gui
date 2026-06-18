@@ -118,7 +118,11 @@ fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<HostEvent>
 /// cancellation [`Notify`]: a `Stop` signals it, `block_on` returns, and the
 /// runtime drop tears the group down. Isolating each group on its own runtime is
 /// the fix for multi-tunnel forward starvation (issue #18).
-fn spawn_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent>) -> GroupHandle {
+fn spawn_group(
+    tunnel_id: String,
+    ports: Vec<(u16, String)>,
+    events: Sender<HostEvent>,
+) -> GroupHandle {
     let cancel = Arc::new(Notify::new());
     let cancel_signal = cancel.clone();
 
@@ -149,13 +153,17 @@ fn spawn_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent>) ->
     GroupHandle { thread, cancel }
 }
 
-/// Fetches the port numbers defined for `tunnel_id` via the management CLI.
-fn collect_ports(tunnel_id: &str, loc: &Locale) -> anyhow::Result<Vec<u16>> {
+/// Fetches the ports defined for `tunnel_id` via the management CLI, each paired
+/// with its configured protocol (`http`/`https`/`auto`). The protocol must be
+/// preserved when forwarding: re-registering a port under a different protocol is
+/// rejected by the service ("the tunnel port protocol cannot be changed") and
+/// would block hosting entirely (issue #36).
+fn collect_ports(tunnel_id: &str, loc: &Locale) -> anyhow::Result<Vec<(u16, String)>> {
     let rows = devtunnel::fetch_rows(loc)?;
-    let ports: Vec<u16> = rows
+    let ports: Vec<(u16, String)> = rows
         .into_iter()
         .filter(|r| r.tunnel_id == tunnel_id && r.port > 0)
-        .filter_map(|r| u16::try_from(r.port).ok())
+        .filter_map(|r| u16::try_from(r.port).ok().map(|p| (p, r.protocol)))
         .collect();
     Ok(ports)
 }
@@ -164,8 +172,8 @@ fn collect_ports(tunnel_id: &str, loc: &Locale) -> anyhow::Result<Vec<u16>> {
 /// reconnect-on-drop and periodic token re-mint. Loops forever; the caller's
 /// `select!` ends it when the group is cancelled (Stop). Returns early only on an
 /// unrecoverable error (e.g. expired sign-in).
-async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent>) {
-    use super::keepalive::{Action, ConnEvent, KeepAliveState, Phase};
+async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender<HostEvent>) {
+    use super::keepalive::{Action, ConnEvent, ConnFailure, KeepAliveState, Phase};
 
     let mut state = KeepAliveState::new();
 
@@ -213,22 +221,41 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
             }
             Err(e) => {
                 let msg = e.to_string();
-                let action = state.next(ConnEvent::ConnectFailed {
-                    auth: devtunnel::is_auth_error(&msg),
-                });
-                // Token mint / connect failed because the CLI sign-in expired:
-                // retrying is pointless until the user re-authenticates, so end
-                // the task (auto-resume re-hosts after a successful sign-in).
-                if action == Action::Relogin {
-                    log::warn!("host engine: {tunnel_id} login expired: {msg}");
-                    let _ = events.send(HostEvent::ReloginRequired {
-                        tunnel_id: tunnel_id.clone(),
-                    });
-                    emit(&events, &tunnel_id, HostState::Error(msg));
-                    return;
+                // Classify the raw error into the policy's failure kind. Auth is
+                // checked first because it has a dedicated recovery path; a 400
+                // from the management API (e.g. a port-protocol mismatch) is
+                // otherwise non-recoverable and must not loop forever (issue #36).
+                let failure = if devtunnel::is_auth_error(&msg) {
+                    ConnFailure::Auth
+                } else if devtunnel::is_fatal_connect_error(&msg) {
+                    ConnFailure::Fatal
+                } else {
+                    ConnFailure::Transient
+                };
+                let action = state.next(ConnEvent::ConnectFailed(failure));
+                match action {
+                    // Sign-in expired: end the task and prompt re-auth (auto-resume
+                    // re-hosts after a successful sign-in).
+                    Action::Relogin => {
+                        log::warn!("host engine: {tunnel_id} login expired: {msg}");
+                        let _ = events.send(HostEvent::ReloginRequired {
+                            tunnel_id: tunnel_id.clone(),
+                        });
+                        emit(&events, &tunnel_id, HostState::Error(msg));
+                        return;
+                    }
+                    // Non-recoverable: surface the error and stop instead of
+                    // retrying identical inputs in an endless backoff loop.
+                    Action::Fail => {
+                        log::warn!("host engine: {tunnel_id} non-recoverable connect error: {msg}");
+                        emit(&events, &tunnel_id, HostState::Error(msg));
+                        return;
+                    }
+                    _ => {
+                        log::warn!("host engine: {tunnel_id} connect failed: {e}");
+                        action
+                    }
                 }
-                log::warn!("host engine: {tunnel_id} connect failed: {e}");
-                action
             }
         };
 
@@ -237,8 +264,8 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
             Action::Sleep(d) => tokio::time::sleep(d).await,
             // `Await` only follows a `Connected` event, which the Ok arm
             // overwrites with the keep-alive outcome before reaching here;
-            // `Relogin` returns in the Err arm above. Neither is reachable.
-            Action::Await | Action::Relogin => {}
+            // `Relogin`/`Fail` return in the Err arm above. None are reachable.
+            Action::Await | Action::Relogin | Action::Fail => {}
         }
     }
 }
@@ -253,7 +280,7 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
 /// and dropping it early makes those tasks busy-loop (see [`host_group`]).
 async fn connect_once(
     tunnel_id: &str,
-    ports: &[u16],
+    ports: &[(u16, String)],
 ) -> anyhow::Result<(RelayTunnelHost, tunnels::connections::RelayHandle)> {
     let loc = Locale::load(&system_locale());
 
@@ -277,16 +304,25 @@ async fn connect_once(
     let handle = host.connect(&host_token).await?;
     log::info!("connect_once[{tunnel_id}]: relay connected");
 
-    for &port in ports {
+    for (port, protocol) in ports {
+        // Forward each port under its configured protocol. The service rejects a
+        // re-registration that changes the protocol, so an `https`/`auto` port
+        // forwarded as `http` would 400 and block hosting (issue #36). Fall back
+        // to `auto` only when the protocol is genuinely absent.
+        let proto = if protocol.trim().is_empty() {
+            "auto"
+        } else {
+            protocol.as_str()
+        };
         let tunnel_port = TunnelPort {
-            port_number: port,
-            protocol: Some("http".to_string()),
+            port_number: *port,
+            protocol: Some(proto.to_string()),
             ..Default::default()
         };
         // `add_port` treats an already-existing port (409) as success.
-        log::debug!("connect_once[{tunnel_id}]: add_port {port}");
+        log::debug!("connect_once[{tunnel_id}]: add_port {port} ({proto})");
         host.add_port(&tunnel_port).await?;
-        log::info!("connect_once[{tunnel_id}]: port {port} forwarded");
+        log::info!("connect_once[{tunnel_id}]: port {port} forwarded ({proto})");
     }
 
     Ok((host, handle))

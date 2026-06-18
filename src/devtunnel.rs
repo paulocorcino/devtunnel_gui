@@ -243,6 +243,25 @@ pub fn is_auth_error(stderr: &str) -> bool {
     lower.contains("token") && (lower.contains("invalid") || lower.contains("revoked"))
 }
 
+/// Classifies a host connect/port-forward error as **non-recoverable**: retrying
+/// with the same inputs can never succeed, so the engine should surface an error
+/// and stop instead of looping the reconnect/backoff forever (each cycle re-mints
+/// two tokens and re-runs the relay handshake against the service).
+///
+/// A `400 Bad Request` from the tunnel management API is a request-validation
+/// failure — e.g. `add_port` rejected with "the tunnel port protocol cannot be
+/// changed" when the forwarded protocol disagrees with the registered one. These
+/// are permanent for identical inputs. Auth failures are handled separately by
+/// [`is_auth_error`] (they have a recovery path: re-login), so callers should
+/// check that first.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn is_fatal_connect_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("400 bad request")
+        || lower.contains("cannot be changed")
+        || lower.contains("invalid arguments")
+}
+
 /// Runs `devtunnel user login` (interactive — opens the system browser and may
 /// show a device code) in its own visible console and waits for it to finish.
 /// Goes through [`interactive_command`] with inherited stdio — never the silent

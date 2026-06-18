@@ -19,6 +19,22 @@ pub const REMINT_AFTER: Duration = Duration::from_secs(20 * 60 * 60);
 const RECONNECT_BACKOFF_START: Duration = Duration::from_secs(2);
 const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
+/// Why a connect attempt failed — drives whether the driver retries, stops, or
+/// asks the user to re-authenticate. The driver classifies the raw error string
+/// (via the `devtunnel` helpers) into one of these so the state machine stays
+/// pure and free of string parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnFailure {
+    /// Expired or absent CLI sign-in: retrying is pointless until the user
+    /// re-authenticates.
+    Auth,
+    /// Non-recoverable (e.g. a `400` from the management API rejecting the
+    /// request): retrying with the same inputs can never succeed, so stop.
+    Fatal,
+    /// Recoverable (network/relay hiccup): back off and retry.
+    Transient,
+}
+
 /// A connection outcome fed into the state machine by the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnEvent {
@@ -28,9 +44,8 @@ pub enum ConnEvent {
     RelayDropped,
     /// The ~20h re-mint timer fired; reconnect with fresh tokens.
     RemintDue,
-    /// A connect attempt failed. `auth` is true when the failure is an expired
-    /// or absent CLI sign-in (retrying is pointless until the user re-auths).
-    ConnectFailed { auth: bool },
+    /// A connect attempt failed, carrying why (see [`ConnFailure`]).
+    ConnectFailed(ConnFailure),
 }
 
 /// What the driver should execute next, returned by [`KeepAliveState::next`].
@@ -42,6 +57,8 @@ pub enum Action {
     Sleep(Duration),
     /// The sign-in is expired: emit `ReloginRequired`, surface an error, stop.
     Relogin,
+    /// A non-recoverable error: surface it and stop. No retry, no relogin prompt.
+    Fail,
 }
 
 /// Presentation phase. The driver maps it to `HostState::Connecting` (first
@@ -100,10 +117,16 @@ impl KeepAliveState {
             // then double it (capped) for the next attempt.
             ConnEvent::RelayDropped | ConnEvent::RemintDue => Action::Sleep(self.bump()),
             // Expired sign-in: stop and ask the user to re-authenticate.
-            ConnEvent::ConnectFailed { auth: true } => Action::Relogin,
+            ConnEvent::ConnectFailed(ConnFailure::Auth) => Action::Relogin,
+            // Non-recoverable error: stop. Retrying identical inputs would loop
+            // forever (re-minting tokens each cycle) without ever succeeding.
+            ConnEvent::ConnectFailed(ConnFailure::Fatal) => {
+                self.first_attempt = false;
+                Action::Fail
+            }
             // Recoverable connect failure: leave the first-attempt phase and
             // back off without resetting (consecutive failures keep doubling).
-            ConnEvent::ConnectFailed { auth: false } => {
+            ConnEvent::ConnectFailed(ConnFailure::Transient) => {
                 self.first_attempt = false;
                 Action::Sleep(self.bump())
             }
@@ -147,7 +170,9 @@ mod tests {
         let mut state = KeepAliveState::new();
         let expected = [2u64, 4, 8, 16, 32, 60, 60];
         let got: Vec<u64> = (0..expected.len())
-            .map(|_| sleep_of(state.next(ConnEvent::ConnectFailed { auth: false })).as_secs())
+            .map(|_| {
+                sleep_of(state.next(ConnEvent::ConnectFailed(ConnFailure::Transient))).as_secs()
+            })
             .collect();
         assert_eq!(got, expected);
     }
@@ -157,11 +182,11 @@ mod tests {
         let mut state = KeepAliveState::new();
         // Grow the backoff with two recoverable failures (2s, then 4s).
         assert_eq!(
-            sleep_of(state.next(ConnEvent::ConnectFailed { auth: false })),
+            sleep_of(state.next(ConnEvent::ConnectFailed(ConnFailure::Transient))),
             secs(2)
         );
         assert_eq!(
-            sleep_of(state.next(ConnEvent::ConnectFailed { auth: false })),
+            sleep_of(state.next(ConnEvent::ConnectFailed(ConnFailure::Transient))),
             secs(4)
         );
         // A successful connect returns Await and resets the backoff.
@@ -182,9 +207,21 @@ mod tests {
     fn auth_error_yields_relogin() {
         let mut state = KeepAliveState::new();
         assert_eq!(
-            state.next(ConnEvent::ConnectFailed { auth: true }),
+            state.next(ConnEvent::ConnectFailed(ConnFailure::Auth)),
             Action::Relogin
         );
+    }
+
+    #[test]
+    fn fatal_error_yields_fail_and_does_not_retry() {
+        let mut state = KeepAliveState::new();
+        // A non-recoverable failure stops the task instead of backing off.
+        assert_eq!(
+            state.next(ConnEvent::ConnectFailed(ConnFailure::Fatal)),
+            Action::Fail
+        );
+        // It also leaves the first-attempt phase, like any completed attempt.
+        assert!(!state.first_attempt());
     }
 
     #[test]
