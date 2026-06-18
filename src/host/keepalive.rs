@@ -124,3 +124,80 @@ impl Default for KeepAliveState {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn secs(n: u64) -> Duration {
+        Duration::from_secs(n)
+    }
+
+    /// Extracts the sleep duration from an [`Action::Sleep`]; panics otherwise so
+    /// a wrong action is an obvious test failure rather than a silent skip.
+    fn sleep_of(action: Action) -> Duration {
+        match action {
+            Action::Sleep(d) => d,
+            other => panic!("expected Action::Sleep, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn backoff_progression_on_repeated_connect_failures() {
+        let mut state = KeepAliveState::new();
+        let expected = [2u64, 4, 8, 16, 32, 60, 60];
+        let got: Vec<u64> = (0..expected.len())
+            .map(|_| sleep_of(state.next(ConnEvent::ConnectFailed { auth: false })).as_secs())
+            .collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn success_resets_backoff_before_next_drop() {
+        let mut state = KeepAliveState::new();
+        // Grow the backoff with two recoverable failures (2s, then 4s).
+        assert_eq!(
+            sleep_of(state.next(ConnEvent::ConnectFailed { auth: false })),
+            secs(2)
+        );
+        assert_eq!(
+            sleep_of(state.next(ConnEvent::ConnectFailed { auth: false })),
+            secs(4)
+        );
+        // A successful connect returns Await and resets the backoff.
+        assert_eq!(state.next(ConnEvent::Connected), Action::Await);
+        // The reconnect sleep after the next relay drop is back to the start.
+        assert_eq!(sleep_of(state.next(ConnEvent::RelayDropped)), secs(2));
+    }
+
+    #[test]
+    fn remint_after_success_sleeps_start_and_remint_const_is_20h() {
+        let mut state = KeepAliveState::new();
+        assert_eq!(state.next(ConnEvent::Connected), Action::Await);
+        assert_eq!(sleep_of(state.next(ConnEvent::RemintDue)), secs(2));
+        assert_eq!(REMINT_AFTER, Duration::from_secs(72_000));
+    }
+
+    #[test]
+    fn auth_error_yields_relogin() {
+        let mut state = KeepAliveState::new();
+        assert_eq!(
+            state.next(ConnEvent::ConnectFailed { auth: true }),
+            Action::Relogin
+        );
+    }
+
+    #[test]
+    fn reconnect_after_drop_changes_phase() {
+        let mut state = KeepAliveState::new();
+        // Fresh state: first attempt, "Connecting" phase.
+        assert!(state.first_attempt());
+        assert_eq!(state.phase(), Phase::Initial);
+        // After a successful connect, later attempts present as "Reconnecting".
+        assert_eq!(state.next(ConnEvent::Connected), Action::Await);
+        assert!(!state.first_attempt());
+        assert_eq!(state.phase(), Phase::Reconnect);
+        // A relay drop schedules the reconnect sleep at the reset backoff.
+        assert_eq!(sleep_of(state.next(ConnEvent::RelayDropped)), secs(2));
+    }
+}
