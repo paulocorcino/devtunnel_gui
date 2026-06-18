@@ -81,7 +81,7 @@ fn run(cmd_rx: std::sync::mpsc::Receiver<HostCommand>, events: Sender<HostEvent>
                     log::debug!("host engine: already hosting {tunnel_id}, ignoring Host");
                     continue;
                 }
-                let ports = match collect_ports(&tunnel_id, &loc) {
+                let ports = match devtunnel::fetch_tunnel_ports(&tunnel_id, &loc) {
                     Ok(ports) => ports,
                     Err(e) => {
                         let msg = e.to_string();
@@ -151,21 +151,6 @@ fn spawn_group(
         .expect("spawning a per-group host thread should not fail");
 
     GroupHandle { thread, cancel }
-}
-
-/// Fetches the ports defined for `tunnel_id` via the management CLI, each paired
-/// with its configured protocol (`http`/`https`/`auto`). The protocol must be
-/// preserved when forwarding: re-registering a port under a different protocol is
-/// rejected by the service ("the tunnel port protocol cannot be changed") and
-/// would block hosting entirely (issue #36).
-fn collect_ports(tunnel_id: &str, loc: &Locale) -> anyhow::Result<Vec<(u16, String)>> {
-    let rows = devtunnel::fetch_rows(loc)?;
-    let ports: Vec<(u16, String)> = rows
-        .into_iter()
-        .filter(|r| r.tunnel_id == tunnel_id && r.port > 0)
-        .filter_map(|r| u16::try_from(r.port).ok().map(|p| (p, r.protocol)))
-        .collect();
-    Ok(ports)
 }
 
 /// Long-running host task for one group: connect → add ports → keep alive, with
