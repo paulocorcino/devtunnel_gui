@@ -59,16 +59,20 @@ All user-facing strings go through the Fluent (`fluent-bundle`) pipeline — nev
 
 This is a Rust project. When writing, reviewing, or refactoring Rust code, invoke the `rust-skills` skill for best-practice guidance. It covers 179 rules across 14 categories: ownership & borrowing, error handling, async patterns, API design, memory optimization, performance, testing, and common anti-patterns.
 
-## Project conventions
+## Agent skills
 
 ### Issue tracker
 
-Issues and PRDs live as markdown files under `docs/backlogs/<feature>/` (no remote tracker — this repo is local). See `docs/agents/issue-tracker.md`.
+Issues are tracked on **GitHub** (`paulocorcino/devtunnel_gui`) via the `gh` CLI. PRDs are versioned in-repo under `docs/prd/`, one per roadmap track, each mapped to a GitHub Milestone. See `docs/agents/issue-tracker.md`. (`docs/backlogs/` is archived — superseded by this model; see its README.)
 
 ### Triage labels
 
-Five canonical roles, default strings: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+Five canonical roles mapped to this repo's GitHub labels: `needs-triage`, `needs-info`, `ready-for-agent` → `AFK`, `ready-for-human` → `HITL`, `wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
 Single-context: one `CONTEXT.md` + `docs/adr/` at the repo root. See `docs/agents/domain.md`.
+
+### PRD / roadmap track model
+
+Adopted. `docs/roadmap.md` is the thin portfolio of tracks; each track is backed by a PRD in `docs/prd/NNNN-tN-slug.md` that maps to one GitHub Milestone. `/to-prd` writes the PRD; `/to-issues` opens the milestone's issues.

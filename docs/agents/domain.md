@@ -17,12 +17,17 @@ Single-context repo:
 /
 ├── CONTEXT.md
 ├── docs/
-│   ├── adr/
-│   │   └── 0001-split-cli-management-sdk-hosting-rust.md
+│   ├── adr/           ← architectural decisions (shares numbering with PRDs)
+│   │   ├── 0001-split-cli-management-sdk-hosting-rust.md
+│   │   └── 0002-per-group-host-thread-isolation.md
 │   ├── agents/        ← this setup (issue-tracker, triage-labels, domain)
-│   └── backlogs/      ← issues + PRDs (local-markdown tracker)
+│   ├── prd/           ← PRDs (one per roadmap track); issues live on GitHub
+│   └── roadmap.md     ← thin portfolio of tracks
 └── src/
 ```
+
+Issues are tracked on **GitHub** (see `issue-tracker.md`), not in-repo. PRDs and the
+roadmap are versioned here; each PRD maps to a GitHub Milestone.
 
 ## Use the glossary's vocabulary
 
