@@ -4,6 +4,7 @@
 #[cfg(windows)]
 mod autostart;
 mod devtunnel;
+mod headless;
 mod host;
 mod icon_render;
 #[cfg(windows)]
@@ -201,6 +202,15 @@ fn main() -> anyhow::Result<()> {
     // problems) and our crate to `info`. Override with RUST_LOG when debugging
     // (e.g. `RUST_LOG=devtunnel_gui=debug,tunnels=info`).
     let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=info,tunnels=warn").install();
+
+    // Headless host runner: a diagnostic/test entrypoint (no GUI, no tray) for
+    // the blackbox E2E resilience harness in `tests/e2e/`. When
+    // `DEVTUNNEL_HEADLESS_HOST=<id>[,<id>…]` is set we drive the production host
+    // engine directly and stream every `HostEvent` as JSON on stdout, returning
+    // before any UI is built. A real engine only exists with `--features hosting`.
+    if let Ok(ids) = std::env::var("DEVTUNNEL_HEADLESS_HOST") {
+        return headless::run(&ids);
+    }
 
     // winit registers the window class with a null icon, so the title bar and
     // taskbar would show the generic default. Install the winit backend with a

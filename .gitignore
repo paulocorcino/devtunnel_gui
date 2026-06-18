@@ -40,3 +40,7 @@ __pycache__/
 # kept locally for analysis only, never versioned.
 profile*.json.gz
 *.json.syms.json
+
+# E2E suite generated run artifacts (regenerated on every run, not versioned)
+tests/e2e/report.json
+tests/e2e/report.md
