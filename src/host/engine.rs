@@ -282,12 +282,32 @@ async fn connect_once(
     tunnel_id: &str,
     ports: &[(u16, String)],
 ) -> anyhow::Result<(RelayTunnelHost, tunnels::connections::RelayHandle)> {
-    let loc = Locale::load(&system_locale());
-
-    log::debug!("connect_once[{tunnel_id}]: minting host token");
-    let host_token = devtunnel::mint_token(tunnel_id, "host", &loc)?;
-    log::debug!("connect_once[{tunnel_id}]: minting manage:ports token");
-    let manage_token = devtunnel::mint_token(tunnel_id, "manage:ports", &loc)?;
+    // Mint both tokens concurrently on blocking threads. `mint_token` is a
+    // blocking subprocess + network round-trip; running the two sequentially on
+    // this current-thread runtime both doubles the wait and — during a re-mint —
+    // stalls the *still-live* relay + port-forward tasks that share this
+    // executor, widening the very outage the re-mint is meant to avoid.
+    // `spawn_blocking` moves each mint off the executor so the old connection
+    // keeps forwarding while the new tokens mint, and `try_join!` overlaps the
+    // two round-trips. `Locale` is `!Send`, so each closure builds its own from
+    // the system locale (used only for error formatting).
+    log::debug!("connect_once[{tunnel_id}]: minting host + manage:ports tokens");
+    let host_task = {
+        let id = tunnel_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            devtunnel::mint_token(&id, "host", &Locale::load(&system_locale()))
+        })
+    };
+    let manage_task = {
+        let id = tunnel_id.to_string();
+        tokio::task::spawn_blocking(move || {
+            devtunnel::mint_token(&id, "manage:ports", &Locale::load(&system_locale()))
+        })
+    };
+    let (host_res, manage_res) = tokio::try_join!(host_task, manage_task)
+        .map_err(|e| anyhow::anyhow!("token mint task panicked: {e}"))?;
+    let host_token = host_res?;
+    let manage_token = manage_res?;
 
     let (cluster, id) = devtunnel::split_locator(tunnel_id).ok_or_else(|| {
         anyhow::anyhow!("tunnel id has no cluster suffix (expected 'id.cluster'): {tunnel_id}")
