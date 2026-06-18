@@ -112,10 +112,7 @@ pub fn preflight() -> Preflight {
 /// command/parse fails. Best-effort and read-only; safe to call off the UI
 /// thread to populate the Settings "Signed in as …" label.
 pub fn current_username() -> Option<String> {
-    let out = command(&bin())
-        .args(["user", "show", "-j"])
-        .output()
-        .ok()?;
+    let out = command(&bin()).args(["user", "show", "-j"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -671,7 +668,11 @@ fn parse_rate_bps(s: &str) -> Option<f64> {
 
 /// Parses a leading integer from a string like `"4 client connections"`.
 fn parse_leading_int(s: &str) -> Option<f64> {
-    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = s
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
