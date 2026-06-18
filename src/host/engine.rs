@@ -30,7 +30,6 @@
 use std::collections::HashMap;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::Duration;
 
 use tokio::sync::Notify;
 use tunnels::connections::RelayTunnelHost;
@@ -43,11 +42,6 @@ use crate::locale::{system_locale, Locale};
 
 /// User-Agent reported to the tunnel management service.
 const USER_AGENT: &str = "devtunnel-gui/0.1";
-/// Re-mint the host/manage tokens before their ~24h expiry. 20h leaves headroom.
-const REMINT_AFTER: Duration = Duration::from_secs(20 * 60 * 60);
-/// Base backoff after a relay drop; doubles up to [`RECONNECT_BACKOFF_MAX`].
-const RECONNECT_BACKOFF_START: Duration = Duration::from_secs(2);
-const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(60);
 
 /// Starts the engine command thread and returns its command channel. The caller
 /// wraps the returned [`Sender`] in a [`super::TunnelHost`].
@@ -171,56 +165,61 @@ fn collect_ports(tunnel_id: &str, loc: &Locale) -> anyhow::Result<Vec<u16>> {
 /// `select!` ends it when the group is cancelled (Stop). Returns early only on an
 /// unrecoverable error (e.g. expired sign-in).
 async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent>) {
-    let mut first_attempt = true;
-    let mut backoff = RECONNECT_BACKOFF_START;
+    use super::keepalive::{Action, ConnEvent, KeepAliveState, Phase};
+
+    let mut state = KeepAliveState::new();
 
     loop {
         emit(
             &events,
             &tunnel_id,
-            if first_attempt {
-                HostState::Connecting
-            } else {
-                HostState::Reconnecting
+            match state.phase() {
+                Phase::Initial => HostState::Connecting,
+                Phase::Reconnect => HostState::Reconnecting,
             },
         );
 
-        match connect_once(&tunnel_id, &ports).await {
-            // `_host` (the `RelayTunnelHost`) MUST stay bound for the whole
-            // connection: it owns the `ports_tx` watch::Sender that every
-            // client's `run_stream` task waits on. The SDK's `run_stream`
-            // ignores the `Result` from `ports.changed()`, so once that sender
-            // is dropped, `changed()` returns `Err` forever and each task spins
-            // a CPU core (observed: ~2.5 cores pegged → freeze under client
-            // churn). Holding `_host` until reconnect/stop keeps the sender
-            // alive so those tasks stay parked instead of busy-looping.
+        let action = match connect_once(&tunnel_id, &ports).await {
+            // INVARIANT: `_host` (the `RelayTunnelHost`) MUST stay bound across
+            // the keep-alive `select!` below — it owns the `ports_tx`
+            // watch::Sender that every client's `run_stream` task waits on. The
+            // SDK's `run_stream` ignores the `Result` from `ports.changed()`, so
+            // once that sender is dropped, `changed()` returns `Err` forever and
+            // each task spins a CPU core (observed: ~2.5 cores pegged → freeze
+            // under client churn). The state machine is pure and channel-free,
+            // so the wait stays inline here: `_host` must not be moved into a
+            // helper that drops it before the await. The only early `return` is
+            // in the `Err` arm, where no live host is bound.
             Ok((_host, handle)) => {
-                backoff = RECONNECT_BACKOFF_START;
-                first_attempt = false;
+                // Success resets the backoff and leaves the first-attempt phase.
+                let _ = state.next(ConnEvent::Connected);
                 emit(&events, &tunnel_id, HostState::Hosting);
 
                 // Keep alive until the relay drops or the re-mint timer fires.
-                tokio::select! {
+                let event = tokio::select! {
                     r = handle => {
                         log::warn!("host engine: {tunnel_id} relay disconnected: {r:?}");
-                        // Fall through to reconnect.
+                        ConnEvent::RelayDropped
                     }
-                    _ = tokio::time::sleep(REMINT_AFTER) => {
+                    _ = tokio::time::sleep(super::keepalive::REMINT_AFTER) => {
                         log::info!("host engine: {tunnel_id} re-minting tokens before expiry");
-                        // Dropping `handle` here closes the current relay session;
-                        // the loop reconnects with freshly minted tokens.
+                        ConnEvent::RemintDue
                     }
-                }
+                };
                 // `_host` and the unfinished `handle` both drop here on the way
                 // to reconnect, tearing down the relay session so old
                 // `run_stream` tasks exit via their stream-closed arm.
+                state.next(event)
             }
             Err(e) => {
                 let msg = e.to_string();
+                let action = state.next(ConnEvent::ConnectFailed {
+                    auth: devtunnel::is_auth_error(&msg),
+                });
                 // Token mint / connect failed because the CLI sign-in expired:
                 // retrying is pointless until the user re-authenticates, so end
                 // the task (auto-resume re-hosts after a successful sign-in).
-                if devtunnel::is_auth_error(&msg) {
+                if action == Action::Relogin {
                     log::warn!("host engine: {tunnel_id} login expired: {msg}");
                     let _ = events.send(HostEvent::ReloginRequired {
                         tunnel_id: tunnel_id.clone(),
@@ -229,13 +228,18 @@ async fn host_group(tunnel_id: String, ports: Vec<u16>, events: Sender<HostEvent
                     return;
                 }
                 log::warn!("host engine: {tunnel_id} connect failed: {e}");
-                first_attempt = false;
+                action
             }
-        }
+        };
 
-        // Backoff before the next (re)connect attempt.
-        tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX);
+        // Execute the policy's decision for the next (re)connect attempt.
+        match action {
+            Action::Sleep(d) => tokio::time::sleep(d).await,
+            // `Await` only follows a `Connected` event, which the Ok arm
+            // overwrites with the keep-alive outcome before reaching here;
+            // `Relogin` returns in the Err arm above. Neither is reachable.
+            Action::Await | Action::Relogin => {}
+        }
     }
 }
 
