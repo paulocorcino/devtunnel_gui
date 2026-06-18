@@ -1012,6 +1012,21 @@ fn main() -> anyhow::Result<()> {
                             }
                             host_changed = true;
                         }
+                        host::HostEvent::Progress { tunnel_id, phase } => {
+                            // Show the connect sub-phase in the status bar so a
+                            // multi-second connect reads as progress, not a hang
+                            // (issue #45). Coarse host state is updated by the
+                            // State arm; this only drives the transient label.
+                            log::debug!("host progress: {tunnel_id} -> {phase:?}");
+                            if let Some(a) = weak.upgrade() {
+                                let key = match phase {
+                                    host::ConnectPhase::Authorizing => "status-connect-authorizing",
+                                    host::ConnectPhase::ConnectingRelay => "status-connect-relay",
+                                    host::ConnectPhase::ForwardingPorts => "status-connect-ports",
+                                };
+                                a.set_status(loc.t(key).into());
+                            }
+                        }
                         host::HostEvent::ReloginRequired { tunnel_id } => {
                             log::warn!("host: re-login required (reported for {tunnel_id})");
                             // Enter the re-login state: banner + alert tray icon +

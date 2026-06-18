@@ -154,6 +154,22 @@ fn event_json(started: Instant, evt: &HostEvent) -> serde_json::Value {
                 "message": message,
             })
         }
+        HostEvent::Progress { tunnel_id, phase } => {
+            // Additive to the `state` stream (issue #45): the coarse Connecting /
+            // Hosting transitions still fire, so a harness keyed on those is
+            // unaffected; this just exposes the sub-phase for finer diagnostics.
+            let phase = match phase {
+                host::ConnectPhase::Authorizing => "authorizing",
+                host::ConnectPhase::ConnectingRelay => "connecting_relay",
+                host::ConnectPhase::ForwardingPorts => "forwarding_ports",
+            };
+            serde_json::json!({
+                "elapsed_ms": elapsed_ms,
+                "event": "progress",
+                "tunnel_id": tunnel_id,
+                "phase": phase,
+            })
+        }
         HostEvent::ReloginRequired { tunnel_id } => serde_json::json!({
             "elapsed_ms": elapsed_ms,
             "event": "relogin_required",

@@ -36,7 +36,7 @@ use tunnels::connections::RelayTunnelHost;
 use tunnels::contracts::TunnelPort;
 use tunnels::management::{new_tunnel_management, Authorization, TunnelLocator};
 
-use super::{HostCommand, HostEvent, HostState};
+use super::{ConnectPhase, HostCommand, HostEvent, HostState};
 use crate::devtunnel;
 use crate::locale::{system_locale, Locale};
 
@@ -172,7 +172,7 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
             },
         );
 
-        let action = match connect_once(&tunnel_id, &ports).await {
+        let action = match connect_once(&tunnel_id, &ports, &events).await {
             // INVARIANT: `_host` (the `RelayTunnelHost`) MUST stay bound across
             // the keep-alive `select!` below — it owns the `ports_tx`
             // watch::Sender that every client's `run_stream` task waits on. The
@@ -266,7 +266,11 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
 async fn connect_once(
     tunnel_id: &str,
     ports: &[(u16, String)],
+    events: &Sender<HostEvent>,
 ) -> anyhow::Result<(RelayTunnelHost, tunnels::connections::RelayHandle)> {
+    // Surface each connect sub-phase so a multi-second wait shows progress
+    // instead of one static "Connecting" label (issue #45).
+    progress(events, tunnel_id, ConnectPhase::Authorizing);
     // Mint both tokens concurrently on blocking threads. `mint_token` is a
     // blocking subprocess + network round-trip; running the two sequentially on
     // this current-thread runtime both doubles the wait and — during a re-mint —
@@ -305,10 +309,14 @@ async fn connect_once(
     let locator = TunnelLocator::ID { cluster, id };
 
     let mut host = RelayTunnelHost::new(locator, mgmt);
+    progress(events, tunnel_id, ConnectPhase::ConnectingRelay);
     log::debug!("connect_once[{tunnel_id}]: connecting to relay");
     let handle = host.connect(&host_token).await?;
     log::info!("connect_once[{tunnel_id}]: relay connected");
 
+    if !ports.is_empty() {
+        progress(events, tunnel_id, ConnectPhase::ForwardingPorts);
+    }
     for (port, protocol) in ports {
         // Forward each port under its configured protocol. The service rejects a
         // re-registration that changes the protocol, so an `https`/`auto` port
@@ -338,5 +346,13 @@ fn emit(events: &Sender<HostEvent>, tunnel_id: &str, state: HostState) {
     let _ = events.send(HostEvent::State {
         tunnel_id: tunnel_id.to_string(),
         state,
+    });
+}
+
+/// Sends a connect sub-phase to the UI, ignoring a closed channel (UI gone).
+fn progress(events: &Sender<HostEvent>, tunnel_id: &str, phase: ConnectPhase) {
+    let _ = events.send(HostEvent::Progress {
+        tunnel_id: tunnel_id.to_string(),
+        phase,
     });
 }
