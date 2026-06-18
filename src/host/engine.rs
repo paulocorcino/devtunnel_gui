@@ -161,6 +161,11 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
     use super::keepalive::{Action, ConnEvent, ConnFailure, KeepAliveState, Phase};
 
     let mut state = KeepAliveState::new();
+    // Tokens minted on a successful connect, reused on the next reconnect so a
+    // relay drop does not re-pay the ~2s mint cost (issue #47). Cleared on a
+    // `RemintDue` (force a fresh mint before expiry) and on any connect failure
+    // (never keep reusing tokens a failed attempt might implicate).
+    let mut cached: Option<Tokens> = None;
 
     loop {
         emit(
@@ -172,7 +177,7 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
             },
         );
 
-        let action = match connect_once(&tunnel_id, &ports, &events).await {
+        let action = match connect_once(&tunnel_id, &ports, &events, cached.take()).await {
             // INVARIANT: `_host` (the `RelayTunnelHost`) MUST stay bound across
             // the keep-alive `select!` below — it owns the `ports_tx`
             // watch::Sender that every client's `run_stream` task waits on. The
@@ -183,9 +188,11 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
             // so the wait stays inline here: `_host` must not be moved into a
             // helper that drops it before the await. The only early `return` is
             // in the `Err` arm, where no live host is bound.
-            Ok((_host, handle)) => {
+            Ok((_host, handle, tokens)) => {
                 // Success resets the backoff and leaves the first-attempt phase.
                 let _ = state.next(ConnEvent::Connected);
+                // Keep the still-valid tokens for the next reconnect.
+                cached = Some(tokens);
                 emit(&events, &tunnel_id, HostState::Hosting);
 
                 // Keep alive until the relay drops or the re-mint timer fires.
@@ -199,6 +206,11 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
                         ConnEvent::RemintDue
                     }
                 };
+                // A re-mint must discard the cache so the next attempt mints fresh
+                // tokens before the old ones expire; a plain relay drop keeps them.
+                if matches!(event, ConnEvent::RemintDue) {
+                    cached = None;
+                }
                 // `_host` and the unfinished `handle` both drop here on the way
                 // to reconnect, tearing down the relay session so old
                 // `run_stream` tasks exit via their stream-closed arm.
@@ -255,32 +267,25 @@ async fn host_group(tunnel_id: String, ports: Vec<(u16, String)>, events: Sender
     }
 }
 
-/// One connect attempt: mint fresh tokens, build the client, connect, add ports.
-/// `Locale` is rebuilt here because it is not `Send` across the `await` points of
-/// the host task.
-///
-/// Returns the live [`RelayTunnelHost`] **and** its [`RelayHandle`]. The caller
-/// must keep the host bound for the lifetime of the connection: it owns the
-/// `ports_tx` watch::Sender that the SDK's per-client `run_stream` tasks wait on,
-/// and dropping it early makes those tasks busy-loop (see [`host_group`]).
-async fn connect_once(
-    tunnel_id: &str,
-    ports: &[(u16, String)],
-    events: &Sender<HostEvent>,
-) -> anyhow::Result<(RelayTunnelHost, tunnels::connections::RelayHandle)> {
-    // Surface each connect sub-phase so a multi-second wait shows progress
-    // instead of one static "Connecting" label (issue #45).
-    progress(events, tunnel_id, ConnectPhase::Authorizing);
-    // Mint both tokens concurrently on blocking threads. `mint_token` is a
-    // blocking subprocess + network round-trip; running the two sequentially on
-    // this current-thread runtime both doubles the wait and — during a re-mint —
-    // stalls the *still-live* relay + port-forward tasks that share this
-    // executor, widening the very outage the re-mint is meant to avoid.
-    // `spawn_blocking` moves each mint off the executor so the old connection
-    // keeps forwarding while the new tokens mint, and `try_join!` overlaps the
-    // two round-trips. `Locale` is `!Send`, so each closure builds its own from
-    // the system locale (used only for error formatting).
-    log::debug!("connect_once[{tunnel_id}]: minting host + manage:ports tokens");
+/// The two scoped tokens a host connection needs, cached across reconnects so a
+/// relay drop does not re-pay the mint cost (issue #47).
+struct Tokens {
+    /// `host` scope — authorizes the relay connection.
+    host: String,
+    /// `manage:ports` scope — authorizes `add_port`'s `create_tunnel_port`.
+    manage: String,
+}
+
+/// Mints both scoped tokens concurrently on blocking threads. `mint_token` is a
+/// blocking subprocess + network round-trip; running the two sequentially on the
+/// group's current-thread runtime both doubles the wait and — during a re-mint —
+/// stalls the *still-live* relay + port-forward tasks sharing this executor,
+/// widening the very outage the re-mint is meant to avoid. `spawn_blocking` moves
+/// each mint off the executor so the old connection keeps forwarding while the new
+/// tokens mint, and `try_join!` overlaps the two round-trips. `Locale` is `!Send`,
+/// so each closure builds its own from the system locale (error formatting only).
+async fn mint_tokens(tunnel_id: &str) -> anyhow::Result<Tokens> {
+    log::debug!("mint_tokens[{tunnel_id}]: minting host + manage:ports tokens");
     let host_task = {
         let id = tunnel_id.to_string();
         tokio::task::spawn_blocking(move || {
@@ -295,8 +300,43 @@ async fn connect_once(
     };
     let (host_res, manage_res) = tokio::try_join!(host_task, manage_task)
         .map_err(|e| anyhow::anyhow!("token mint task panicked: {e}"))?;
-    let host_token = host_res?;
-    let manage_token = manage_res?;
+    Ok(Tokens {
+        host: host_res?,
+        manage: manage_res?,
+    })
+}
+
+/// One connect attempt: obtain tokens (reuse `cached` or mint fresh), build the
+/// client, connect, add ports.
+///
+/// `cached` carries the tokens from the previous successful connect; when present
+/// they are reused — skipping the ~2s mint (and the `Authorizing` phase) — and
+/// otherwise a fresh pair is minted (issue #47). On success the tokens used are
+/// returned in the tuple so the caller can cache them for the next reconnect.
+///
+/// Returns the live [`RelayTunnelHost`] **and** its [`RelayHandle`]. The caller
+/// must keep the host bound for the lifetime of the connection: it owns the
+/// `ports_tx` watch::Sender that the SDK's per-client `run_stream` tasks wait on,
+/// and dropping it early makes those tasks busy-loop (see [`host_group`]).
+async fn connect_once(
+    tunnel_id: &str,
+    ports: &[(u16, String)],
+    events: &Sender<HostEvent>,
+    cached: Option<Tokens>,
+) -> anyhow::Result<(RelayTunnelHost, tunnels::connections::RelayHandle, Tokens)> {
+    // Reuse the previous connect's still-valid tokens when available; only mint
+    // (surfaced as the `Authorizing` phase, issue #45) when there is no cached
+    // pair — i.e. the first connect, a re-mint, or after a failed attempt.
+    let tokens = match cached {
+        Some(tokens) => {
+            log::debug!("connect_once[{tunnel_id}]: reusing cached tokens");
+            tokens
+        }
+        None => {
+            progress(events, tunnel_id, ConnectPhase::Authorizing);
+            mint_tokens(tunnel_id).await?
+        }
+    };
 
     let (cluster, id) = devtunnel::split_locator(tunnel_id).ok_or_else(|| {
         anyhow::anyhow!("tunnel id has no cluster suffix (expected 'id.cluster'): {tunnel_id}")
@@ -304,14 +344,16 @@ async fn connect_once(
     log::debug!("connect_once[{tunnel_id}]: locator cluster={cluster} id={id} ports={ports:?}");
 
     let mut builder = new_tunnel_management(USER_AGENT);
-    builder.authorization(Authorization::Tunnel(manage_token));
+    // Clone into the client so the original stays in `tokens`, which is returned
+    // for the caller to cache and reuse on the next reconnect.
+    builder.authorization(Authorization::Tunnel(tokens.manage.clone()));
     let mgmt = builder.into();
     let locator = TunnelLocator::ID { cluster, id };
 
     let mut host = RelayTunnelHost::new(locator, mgmt);
     progress(events, tunnel_id, ConnectPhase::ConnectingRelay);
     log::debug!("connect_once[{tunnel_id}]: connecting to relay");
-    let handle = host.connect(&host_token).await?;
+    let handle = host.connect(&tokens.host).await?;
     log::info!("connect_once[{tunnel_id}]: relay connected");
 
     if !ports.is_empty() {
@@ -338,7 +380,7 @@ async fn connect_once(
         log::info!("connect_once[{tunnel_id}]: port {port} forwarded ({proto})");
     }
 
-    Ok((host, handle))
+    Ok((host, handle, tokens))
 }
 
 /// Sends a state transition to the UI, ignoring a closed channel (UI gone).
