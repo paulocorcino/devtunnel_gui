@@ -4,6 +4,7 @@
 #[cfg(windows)]
 mod autostart;
 mod devtunnel;
+mod headless;
 mod host;
 mod icon_render;
 #[cfg(windows)]
@@ -15,6 +16,7 @@ mod model;
 #[cfg(feature = "hosting")]
 mod probe;
 mod state;
+mod view;
 
 slint::include_modules!();
 
@@ -48,23 +50,12 @@ enum Action {
     Open(String),
 }
 
-/// Status id assigned to optimistic placeholder rows (see [`rebuild_rows`]).
-/// Drives the "Provisioning…" badge and disables the row's action buttons.
-const PROVISIONING_STATUS: &str = "provisioning";
+use view::Placeholder;
 
 /// A deletion awaiting user confirmation. `port == None` means delete the whole group.
 struct PendingDelete {
     tunnel_id: String,
     port: Option<i32>,
-}
-
-/// An optimistic placeholder inserted immediately when a create-group / add-port
-/// operation is dispatched. Replaced by the real row when the op's refresh lands.
-struct Placeholder {
-    id: u64,
-    group: String,
-    port: i32,
-    protocol: String,
 }
 
 /// UI-thread state derived from host/probe events. Persists across reloads so a
@@ -124,21 +115,6 @@ impl LiveState {
     }
 }
 
-/// Derives a row's `status` id from the latest probe + host state.
-/// Probe result wins (it is the most specific); otherwise fall back to the
-/// group's host state ("host" = hosting but not yet probed), then to the
-/// service-reported `host_connections` count, then "idle".
-fn derive_status(state: &LiveState, tunnel_id: &str, port: i32, host_connections: i64) -> String {
-    if let Some(s) = state.probe.get(&(tunnel_id.to_string(), port)) {
-        return s.clone();
-    }
-    match state.host.get(tunnel_id).map(String::as_str) {
-        Some("hosting") | Some("host") => "host".to_string(),
-        _ if host_connections > 0 => "host".to_string(),
-        _ => "idle".to_string(),
-    }
-}
-
 /// Maps a [`host::HostState`] to the stored host-state id, or `None` when the
 /// group is no longer hosted (Stopped / Idle / Error -> clear).
 fn map_host_state(hs: &host::HostState) -> Option<&'static str> {
@@ -180,18 +156,6 @@ fn hosting_targets(state: &LiveState) -> Vec<probe::ProbeTarget> {
         .collect()
 }
 
-/// Derives the group toggle state:
-/// - `"hosting"` when this session is actively hosting the group,
-/// - `"external"` when the service reports active connections but this session is not hosting,
-/// - `""` otherwise.
-fn derive_host_state(state: &LiveState, tunnel_id: &str, host_connections: i64) -> String {
-    match state.host.get(tunnel_id).map(String::as_str) {
-        Some("hosting") | Some("host") => "hosting".to_string(),
-        _ if host_connections > 0 => "external".to_string(),
-        _ => String::new(),
-    }
-}
-
 fn main() -> anyhow::Result<()> {
     // Install the capturing logger in every build: it tees records to stderr
     // (what env_logger used to print in the hosting build).
@@ -201,6 +165,15 @@ fn main() -> anyhow::Result<()> {
     // problems) and our crate to `info`. Override with RUST_LOG when debugging
     // (e.g. `RUST_LOG=devtunnel_gui=debug,tunnels=info`).
     let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=info,tunnels=warn").install();
+
+    // Headless host runner: a diagnostic/test entrypoint (no GUI, no tray) for
+    // the blackbox E2E resilience harness in `tests/e2e/`. When
+    // `DEVTUNNEL_HEADLESS_HOST=<id>[,<id>…]` is set we drive the production host
+    // engine directly and stream every `HostEvent` as JSON on stdout, returning
+    // before any UI is built. A real engine only exists with `--features hosting`.
+    if let Ok(ids) = std::env::var("DEVTUNNEL_HEADLESS_HOST") {
+        return headless::run(&ids);
+    }
 
     // winit registers the window class with a null icon, so the title bar and
     // taskbar would show the generic default. Install the winit backend with a
@@ -1002,6 +975,21 @@ fn main() -> anyhow::Result<()> {
                             }
                             host_changed = true;
                         }
+                        host::HostEvent::Progress { tunnel_id, phase } => {
+                            // Show the connect sub-phase in the status bar so a
+                            // multi-second connect reads as progress, not a hang
+                            // (issue #45). Coarse host state is updated by the
+                            // State arm; this only drives the transient label.
+                            log::debug!("host progress: {tunnel_id} -> {phase:?}");
+                            if let Some(a) = weak.upgrade() {
+                                let key = match phase {
+                                    host::ConnectPhase::Authorizing => "status-connect-authorizing",
+                                    host::ConnectPhase::ConnectingRelay => "status-connect-relay",
+                                    host::ConnectPhase::ForwardingPorts => "status-connect-ports",
+                                };
+                                a.set_status(loc.t(key).into());
+                            }
+                        }
                         host::HostEvent::ReloginRequired { tunnel_id } => {
                             log::warn!("host: re-login required (reported for {tunnel_id})");
                             // Enter the re-login state: banner + alert tray icon +
@@ -1057,17 +1045,45 @@ fn main() -> anyhow::Result<()> {
                 #[cfg(feature = "hosting")]
                 let mut probe_changed = false;
                 #[cfg(feature = "hosting")]
-                while let Ok(probe::ProbeEvent::Status {
-                    tunnel_id,
-                    port,
-                    state: ps,
-                }) = probe_evt_rx.try_recv()
-                {
-                    state
-                        .borrow_mut()
-                        .probe
-                        .insert((tunnel_id, port), map_probe_state(&ps).to_string());
-                    probe_changed = true;
+                while let Ok(ev) = probe_evt_rx.try_recv() {
+                    match ev {
+                        probe::ProbeEvent::Status {
+                            tunnel_id,
+                            port,
+                            state: ps,
+                        } => {
+                            state
+                                .borrow_mut()
+                                .probe
+                                .insert((tunnel_id, port), map_probe_state(&ps).to_string());
+                            probe_changed = true;
+                        }
+                        // Zombie-tunnel instrumentation (issue #37): the probe found the
+                        // Public URL unreachable while the local port is up. That is a
+                        // zombie only if the engine still believes the group is Hosting
+                        // (its RelayHandle never resolved); otherwise it is an ordinary
+                        // drop the engine is already reconnecting. Log/flag only — no
+                        // behaviour change. The recorded occurrences feed the #37
+                        // go/no-go and, once that gates open, the #39 reconnect bridge.
+                        probe::ProbeEvent::PublicUnreachable { tunnel_id, port } => {
+                            let hosting = matches!(
+                                state.borrow().host.get(&tunnel_id).map(String::as_str),
+                                Some("hosting")
+                            );
+                            if hosting {
+                                log::warn!(
+                                    "zombie-tunnel suspect: {tunnel_id} port {port} — Public URL \
+                                     unreachable while the local port is listening and the engine \
+                                     state is Hosting (RelayHandle not resolved)"
+                                );
+                            } else {
+                                log::debug!(
+                                    "probe: {tunnel_id} port {port} Public URL unreachable but the \
+                                     engine is not Hosting — ordinary drop, not a zombie"
+                                );
+                            }
+                        }
+                    }
                 }
 
                 // Re-point the probe at the currently-hosting groups' URLs whenever
@@ -1430,14 +1446,10 @@ fn apply_rows(
             // Also persist the rows so the next startup paints immediately.
             state::save_row_cache(&rows);
             state.borrow_mut().rows = rows;
-            // The header chip counts the ports actually rendered into the cards
-            // (returned by rebuild_rows), not raw `rows`: an optimistically-hidden
-            // or stale port must not inflate the chip while its card shows portless.
-            let count = rebuild_rows(&app, tray, actions, state, loc);
-
-            let mut args = FluentArgs::new();
-            args.set("count", count as i64);
-            app.set_status(loc.t_args("status-port-count", &args).into());
+            // The header chip is set inside rebuild_rows from the ports actually
+            // rendered into the cards (not raw `rows`): an optimistically-hidden or
+            // stale port must not inflate the chip while its card shows portless.
+            rebuild_rows(&app, tray, actions, state, loc);
             true
         }
         Err(e) => {
@@ -1477,141 +1489,71 @@ fn rebuild_rows(
     loc: &Rc<Locale>,
 ) -> usize {
     let st = state.borrow();
-    // Count of real service ports rendered into the cards; returned for the header.
-    let mut rendered_ports = 0usize;
-    // Build a flat index space first: every visible (non-hidden) real port gets a
-    // stable `row-index` used to key the expandable detail panel (issue #17). The
-    // same index drives `selected-index` so the open panel survives reloads.
-    // Optimistic delete (#13) hides ports/groups awaiting their confirming refresh.
-    // Only a group-level delete (`(id, None)`) drops the whole card here; a
-    // port-level delete (`(id, Some(port))`) keeps the row in the index space and
-    // is skipped further down when attaching ports. This way deleting a group's
-    // last port leaves the card standing (as portless) instead of flickering the
-    // whole card out and back when the confirming refresh lands.
-    let visible_rows: Vec<&devtunnel::Row> = st
-        .rows
+
+    // All folding (visible-row index space, optimistic delete/placeholder
+    // handling, derived status/host-state, detail-panel reconciliation) lives in
+    // the pure `view::fold`. main.rs only feeds the inputs and maps the plain
+    // result onto Slint structs + the tray menu.
+    let out = view::fold(&view::FoldInput {
+        rows: &st.rows,
+        probe: &st.probe,
+        host: &st.host,
+        hidden: &st.hidden,
+        placeholders: &st.placeholders,
+        detail: st.detail.as_ref(),
+    });
+
+    // Map the plain group/port data onto the Slint models.
+    let groups: Vec<GroupView> = out
+        .groups
         .iter()
-        .filter(|r| !st.hidden.contains(&(r.tunnel_id.clone(), None)))
-        .collect();
-
-    // Fold the flat rows into groups (Real Tunnel ID order preserved). Ports are
-    // collected separately and attached as models at the end.
-    let mut groups: Vec<GroupView> = Vec::new();
-    let mut ports: Vec<Vec<PortView>> = Vec::new();
-    let mut index: HashMap<String, usize> = HashMap::new();
-    for (flat_idx, r) in visible_rows.iter().enumerate() {
-        let gi = match index.get(&r.tunnel_id) {
-            Some(&i) => i,
-            None => {
-                index.insert(r.tunnel_id.clone(), groups.len());
-                groups.push(GroupView {
-                    group: r.group.clone().into(),
-                    tunnel_id: r.tunnel_id.clone().into(),
-                    expiration: r.expiration.clone().into(),
-                    hosting: derive_host_state(&st, &r.tunnel_id, r.host_connections) == "hosting",
-                    // "Hosted elsewhere" pill: service reports connections but this
-                    // session is not hosting the group (issue #15).
-                    host_state: derive_host_state(&st, &r.tunnel_id, r.host_connections).into(),
-                    provisioning: false,
-                    has_port: false,
-                    ports: ModelRc::default(),
-                });
-                ports.push(Vec::new());
-                groups.len() - 1
-            }
-        };
-        // A port==0 row is a portless group: keep the card, skip the port row.
-        // A port hidden by an optimistic delete (#13) likewise keeps its card but
-        // drops the port row until the reflush refresh confirms the deletion.
-        if r.port != 0 && !st.hidden.contains(&(r.tunnel_id.clone(), Some(r.port))) {
-            groups[gi].has_port = true;
-            rendered_ports += 1;
-            ports[gi].push(PortView {
-                port: r.port,
-                protocol: r.protocol.clone().into(),
-                url: r.url.clone().into(),
-                status: derive_status(&st, &r.tunnel_id, r.port, r.host_connections).into(),
-                row_index: flat_idx as i32,
-            });
-        }
-    }
-
-    // Optimistic placeholders for in-flight creates: attach the provisioning
-    // port to its existing group (matched by friendly name) when possible,
-    // otherwise add a whole provisioning card. Placeholders are inert, so they
-    // carry row-index -1 (not expandable).
-    for p in &st.placeholders {
-        match groups.iter().position(|g| g.group == p.group.as_str()) {
-            Some(gi) if p.port != 0 => ports[gi].push(PortView {
-                port: p.port,
-                protocol: p.protocol.clone().into(),
-                url: SharedString::new(),
-                status: PROVISIONING_STATUS.into(),
-                row_index: -1,
-            }),
-            _ => {
-                groups.push(GroupView {
-                    group: p.group.clone().into(),
-                    tunnel_id: SharedString::new(),
-                    expiration: SharedString::new(),
-                    hosting: false,
-                    host_state: SharedString::new(),
-                    provisioning: true,
-                    has_port: p.port != 0,
-                    ports: ModelRc::default(),
-                });
-                ports.push(if p.port != 0 {
-                    vec![PortView {
+        .map(|g| GroupView {
+            group: g.group.clone().into(),
+            tunnel_id: g.tunnel_id.clone().into(),
+            expiration: g.expiration.clone().into(),
+            hosting: g.hosting,
+            host_state: g.host_state.clone().into(),
+            provisioning: g.provisioning,
+            has_port: g.has_port,
+            ports: ModelRc::new(VecModel::from(
+                g.ports
+                    .iter()
+                    .map(|p| PortView {
                         port: p.port,
                         protocol: p.protocol.clone().into(),
-                        url: SharedString::new(),
-                        status: PROVISIONING_STATUS.into(),
-                        row_index: -1,
-                    }]
-                } else {
-                    Vec::new()
-                });
-            }
-        }
-    }
-    for (g, pv) in groups.iter_mut().zip(ports) {
-        g.ports = ModelRc::new(VecModel::from(pv));
-    }
-
-    // Recompute the expanded port's flat index: rows can reorder or disappear
-    // across reloads, so the selection is keyed by (tunnel_id, port), not index.
-    let mut selected = -1;
-    let mut stale_detail = false;
-    if let Some((tid, port)) = st.detail.as_ref() {
-        // A port hidden by an optimistic delete is still in `visible_rows` (to keep
-        // its group card alive), so check the hidden set too: deleting the expanded
-        // port must collapse the panel rather than leave it pointing at a gone row.
-        let deleting = st.hidden.contains(&(tid.clone(), Some(*port)))
-            || st.hidden.contains(&(tid.clone(), None));
-        match visible_rows
-            .iter()
-            .position(|r| r.tunnel_id == tid.as_str() && r.port == *port)
-        {
-            Some(i) if !deleting => selected = i as i32,
-            _ => stale_detail = true,
-        }
-    }
+                        url: p.url.clone().into(),
+                        status: p.status.clone().into(),
+                        row_index: p.row_index,
+                    })
+                    .collect::<Vec<_>>(),
+            )),
+        })
+        .collect();
 
     // Rebuild the tray menu with per-port actions from the same load (placeholders
     // have no URL, so they are skipped by build_tray_menu).
     let menu = build_tray_menu(&st.rows, &mut actions.borrow_mut(), loc);
     tray.set_menu(Some(Box::new(menu)));
 
-    app.set_selected_index(selected);
+    app.set_selected_index(out.selected_index);
     app.set_groups(ModelRc::new(VecModel::from(groups)));
 
     // The selected port no longer exists (deleted elsewhere): collapse so the
     // poll timer stops issuing CLI calls for it.
     drop(st);
-    if stale_detail {
+    if out.stale_detail {
         state.borrow_mut().detail = None;
     }
-    rendered_ports
+
+    // Keep the header chip in lockstep with the cards: it is set here, at the one
+    // place that knows how many real ports were actually rendered, so it can never
+    // disagree with what the list shows. Callers that need a transient message
+    // (creating…, deleting…, an error) set it *after* this returns and win.
+    let mut args = FluentArgs::new();
+    args.set("count", out.rendered_ports as i64);
+    app.set_status(loc.t_args("status-port-count", &args).into());
+
+    out.rendered_ports
 }
 
 /// Fires a `fetch_port_status` for the selected port on a background thread;
@@ -1995,72 +1937,26 @@ mod tests {
             host_connections: 0,
         });
 
-        // No placeholder yet — only one row, status derives to "idle".
-        let real_row_status = derive_status(&st, "tid1", 9000, 0);
+        // No placeholder yet — only one row, status derives to "idle". The
+        // derivation itself is exhaustively tested in `view`; here we just sanity
+        // check the LiveState maps feed it correctly.
+        let real_row_status = view::derive_status(&st.probe, &st.host, "tid1", 9000, 0);
         assert_eq!(real_row_status, "idle");
 
-        // Push a placeholder; its fields are what `rebuild_rows` turns into a row.
+        // Push a placeholder; its fields are what `view::fold` turns into a row.
         let id = st.push_placeholder("new-group".into(), 4000, "tcp".into());
         assert_eq!(st.placeholders.len(), 1);
         assert_eq!(st.placeholders[0].port, 4000);
         assert_eq!(st.placeholders[0].group, "new-group");
         assert_eq!(st.placeholders[0].protocol, "tcp");
 
-        // `rebuild_rows` assigns this id to every placeholder row, which the
+        // `view::fold` assigns this id to every placeholder row, which the
         // theme/UI render as the "Provisioning…" badge.
-        assert_eq!(PROVISIONING_STATUS, "provisioning");
+        assert_eq!(view::PROVISIONING_STATUS, "provisioning");
 
         // After removal the placeholder list is empty again.
         st.remove_placeholder(id);
         assert!(st.placeholders.is_empty());
-    }
-
-    #[test]
-    fn derive_host_state_session_hosting_wins_over_service_count() {
-        let mut st = make_state();
-        st.host.insert("t1".into(), "hosting".into());
-        // Even with host_connections > 0, this-session state returns "hosting".
-        assert_eq!(derive_host_state(&st, "t1", 3), "hosting");
-    }
-
-    #[test]
-    fn derive_host_state_session_connecting_wins_over_service_count() {
-        let mut st = make_state();
-        st.host.insert("t1".into(), "host".into());
-        assert_eq!(derive_host_state(&st, "t1", 1), "hosting");
-    }
-
-    #[test]
-    fn derive_host_state_external_when_service_has_connections() {
-        let st = make_state();
-        // No entry in st.host (this session is not hosting), but service reports connections.
-        assert_eq!(derive_host_state(&st, "t1", 2), "external");
-    }
-
-    #[test]
-    fn derive_host_state_idle_when_no_connections() {
-        let st = make_state();
-        assert_eq!(derive_host_state(&st, "t1", 0), "");
-    }
-
-    #[test]
-    fn derive_status_session_hosting_wins() {
-        let mut st = make_state();
-        st.host.insert("t1".into(), "hosting".into());
-        assert_eq!(derive_status(&st, "t1", 3000, 0), "host");
-    }
-
-    #[test]
-    fn derive_status_external_host_connections_gives_host_color() {
-        let st = make_state();
-        // service says hosted externally — dot should use "host" color
-        assert_eq!(derive_status(&st, "t1", 3000, 1), "host");
-    }
-
-    #[test]
-    fn derive_status_zero_connections_is_idle() {
-        let st = make_state();
-        assert_eq!(derive_status(&st, "t1", 3000, 0), "idle");
     }
 
     fn make_row(tunnel_id: &str, port: i32) -> devtunnel::Row {

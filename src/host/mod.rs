@@ -15,6 +15,13 @@
 
 use std::sync::mpsc::Sender;
 
+// The pure keep-alive state machine (issue #35) lives in `keepalive.rs`. It has
+// zero SDK deps, so it is declared unconditionally — its tests run under a plain
+// `cargo test` without the vendored-OpenSSL toolchain. The `#![allow(dead_code)]`
+// above keeps the items it exposes but the default build never calls from
+// warning.
+mod keepalive;
+
 // The real SDK-backed engine (connect/keep-alive/stop) lives in `engine.rs` and
 // is compiled only with `--features hosting`.
 #[cfg(feature = "hosting")]
@@ -37,6 +44,21 @@ pub enum HostState {
     Error(String),
 }
 
+/// A sub-phase of an in-progress connect, reported via [`HostEvent::Progress`]
+/// so a multi-second connect shows what it is doing instead of a single static
+/// "Connecting" label (issue #45). Purely informational: it does not change the
+/// coarse [`HostState`] lifecycle, so consumers that only track Connecting /
+/// Hosting / Reconnecting can ignore it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectPhase {
+    /// Minting the `host` + `manage:ports` tokens.
+    Authorizing,
+    /// Establishing the relay connection (TLS/SSH handshake).
+    ConnectingRelay,
+    /// Registering the group's ports on the relay.
+    ForwardingPorts,
+}
+
 /// A command sent to the host engine.
 #[derive(Debug, Clone)]
 pub enum HostCommand {
@@ -44,6 +66,12 @@ pub enum HostCommand {
     Host { tunnel_id: String },
     /// Stop hosting the given group; its definition is left intact.
     Stop { tunnel_id: String },
+    /// Diagnostic: force the group's live relay connection to drop and reconnect,
+    /// *without* tearing the group down — exercises the real reconnect path
+    /// (including token reuse, issue #47) deterministically and without a network
+    /// outage / firewall block. Emitted only by the headless test runner; the GUI
+    /// never sends it.
+    DropRelay { tunnel_id: String },
 }
 
 /// An event emitted by the host engine for the UI to consume.
@@ -51,6 +79,13 @@ pub enum HostCommand {
 pub enum HostEvent {
     /// A group's hosting state changed.
     State { tunnel_id: String, state: HostState },
+    /// A group's connect advanced to a new sub-phase (issue #45). Additive to
+    /// [`HostEvent::State`]: the coarse Connecting/Hosting transitions still
+    /// fire, so a consumer can ignore this without missing any lifecycle change.
+    Progress {
+        tunnel_id: String,
+        phase: ConnectPhase,
+    },
     /// The CLI sign-in is expired or absent; hosting cannot proceed until the
     /// user re-authenticates via `devtunnel user login`.
     ReloginRequired { tunnel_id: String },

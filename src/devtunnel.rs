@@ -112,10 +112,7 @@ pub fn preflight() -> Preflight {
 /// command/parse fails. Best-effort and read-only; safe to call off the UI
 /// thread to populate the Settings "Signed in as …" label.
 pub fn current_username() -> Option<String> {
-    let out = command(&bin())
-        .args(["user", "show", "-j"])
-        .output()
-        .ok()?;
+    let out = command(&bin()).args(["user", "show", "-j"]).output().ok()?;
     if !out.status.success() {
         return None;
     }
@@ -244,6 +241,25 @@ pub fn is_auth_error(stderr: &str) -> bool {
     }
     // A token reported as invalid/revoked is also an auth failure.
     lower.contains("token") && (lower.contains("invalid") || lower.contains("revoked"))
+}
+
+/// Classifies a host connect/port-forward error as **non-recoverable**: retrying
+/// with the same inputs can never succeed, so the engine should surface an error
+/// and stop instead of looping the reconnect/backoff forever (each cycle re-mints
+/// two tokens and re-runs the relay handshake against the service).
+///
+/// A `400 Bad Request` from the tunnel management API is a request-validation
+/// failure — e.g. `add_port` rejected with "the tunnel port protocol cannot be
+/// changed" when the forwarded protocol disagrees with the registered one. These
+/// are permanent for identical inputs. Auth failures are handled separately by
+/// [`is_auth_error`] (they have a recovery path: re-login), so callers should
+/// check that first.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn is_fatal_connect_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("400 bad request")
+        || lower.contains("cannot be changed")
+        || lower.contains("invalid arguments")
 }
 
 /// Runs `devtunnel user login` (interactive — opens the system browser and may
@@ -671,7 +687,11 @@ fn parse_rate_bps(s: &str) -> Option<f64> {
 
 /// Parses a leading integer from a string like `"4 client connections"`.
 fn parse_leading_int(s: &str) -> Option<f64> {
-    let digits: String = s.trim().chars().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = s
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     digits.parse().ok()
 }
 
@@ -731,13 +751,61 @@ pub fn fetch_rows(loc: &Locale) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
+/// Fetches the ports of a single tunnel via `devtunnel show <id> -j`, each paired
+/// with its configured protocol. Targeted single-subprocess lookup: unlike
+/// [`fetch_rows`], it does not enumerate the whole account (`list` + a `show` per
+/// tunnel), so hosting one tunnel costs one CLI round-trip regardless of how many
+/// tunnels the account holds (issue #44). The protocol is carried through because
+/// re-registering a port under a different protocol is rejected by the service
+/// and would block hosting (issue #36).
+///
+/// # Errors
+/// Propagates the CLI/JSON failure from the underlying `show` call.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn fetch_tunnel_ports(tunnel_id: &str, loc: &Locale) -> Result<Vec<(u16, String)>> {
+    let show: ShowResult = run_json(&["show", tunnel_id, "-j"], loc)?;
+    Ok(tunnel_ports(show))
+}
+
+/// Maps a `show -j` result to `(port, protocol)` pairs, dropping ports that are
+/// absent (`0`) or outside the valid `u16` range. Pure: split out from
+/// [`fetch_tunnel_ports`] so the mapping is unit-tested without the CLI.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+fn tunnel_ports(show: ShowResult) -> Vec<(u16, String)> {
+    show.tunnel
+        .ports
+        .into_iter()
+        .filter(|p| p.port_number > 0)
+        .filter_map(|p| u16::try_from(p.port_number).ok().map(|n| (n, p.protocol)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         anonymous_ace_args, classify_anonymous_access, classify_install_result, classify_user_show,
         is_auth_error, parse_leading_int, parse_rate_bps, parse_size_bytes, sanitize_tunnel_id,
-        update_expiration_args, InstallOutcome,
+        tunnel_ports, update_expiration_args, InstallOutcome, ShowResult,
     };
+
+    #[test]
+    fn tunnel_ports_filters_zero_and_preserves_protocol() {
+        // `show -j` of one tunnel: a plain-http port, an https port, and an
+        // unconfigured (`0`) entry that must be dropped.
+        let json = r#"{ "tunnel": { "tunnelId": "x", "ports": [
+            { "portNumber": 3000, "protocol": "http" },
+            { "portNumber": 8443, "protocol": "https" },
+            { "portNumber": 0, "protocol": "auto" }
+        ] } }"#;
+        let show: ShowResult = serde_json::from_str(json).expect("valid show JSON");
+        assert_eq!(
+            tunnel_ports(show),
+            vec![
+                (3000u16, "http".to_string()),
+                (8443u16, "https".to_string())
+            ]
+        );
+    }
 
     #[test]
     fn parse_size_bytes_handles_units_and_locales() {
