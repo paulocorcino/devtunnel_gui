@@ -59,6 +59,11 @@ name = "host_spike"
 path = "src/bin/host_spike.rs"
 required-features = ["spike"]
 
+[[bin]]
+name = "two_host_probe"
+path = "src/bin/two_host_probe.rs"
+required-features = ["spike"]
+
 [build-dependencies]
 slint-build = "1.13"
 
