@@ -960,6 +960,21 @@ fn main() -> anyhow::Result<()> {
                                         update_tray_icon(&tray, "relogin");
                                     }
                                 }
+                                // The tunnel was deleted/expired mid-session: drop
+                                // it from the persisted auto-host set so the next
+                                // launch does not retry a host that can never
+                                // succeed (the loop that left it stuck on
+                                // "authorizing…").
+                                if devtunnel::is_missing_tunnel_error(msg) {
+                                    let mut ps = app_state.borrow_mut();
+                                    if ps.contains_auto_host(&tunnel_id) {
+                                        ps.remove_auto_host(&tunnel_id);
+                                        ps.save();
+                                        log::info!(
+                                            "host: {tunnel_id} no longer exists; removed from auto-host set"
+                                        );
+                                    }
+                                }
                             }
                             let id = map_host_state(&hs);
                             let mut st = state.borrow_mut();
@@ -1016,8 +1031,11 @@ fn main() -> anyhow::Result<()> {
                     let ids = app_state.borrow().auto_host.clone();
                     if !ids.is_empty() {
                         let mut st = state.borrow_mut();
+                        let mut pruned = false;
                         for id in &ids {
-                            let known = st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
+                            let exists = st.rows.iter().any(|r| &r.tunnel_id == id);
+                            let known =
+                                exists && st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
                             if known {
                                 log::info!("auto-resume: hosting {id}");
                                 tunnel_host.send(host::HostCommand::Host {
@@ -1025,9 +1043,21 @@ fn main() -> anyhow::Result<()> {
                                 });
                                 st.host.insert(id.clone(), "host".to_string());
                                 host_changed = true;
+                            } else if !exists {
+                                // The tunnel no longer exists (deleted/expired
+                                // while the app was closed): drop it so we stop
+                                // carrying a dead entry across launches.
+                                log::info!(
+                                    "auto-resume: {id} no longer exists; removing from auto-host set"
+                                );
+                                app_state.borrow_mut().remove_auto_host(id);
+                                pruned = true;
                             } else {
-                                log::info!("auto-resume: skipping unknown or portless group {id}");
+                                log::info!("auto-resume: skipping portless group {id}");
                             }
+                        }
+                        if pruned {
+                            app_state.borrow().save();
                         }
                     }
                 }

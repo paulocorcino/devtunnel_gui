@@ -251,7 +251,10 @@ pub fn is_auth_error(stderr: &str) -> bool {
 /// A `400 Bad Request` from the tunnel management API is a request-validation
 /// failure — e.g. `add_port` rejected with "the tunnel port protocol cannot be
 /// changed" when the forwarded protocol disagrees with the registered one. These
-/// are permanent for identical inputs. Auth failures are handled separately by
+/// are permanent for identical inputs. A deleted or expired tunnel surfaces as
+/// "Tunnel not found" / `404` while minting tokens; retrying that re-mint can
+/// never succeed, so it must stop instead of spinning the reconnect loop forever
+/// stuck on the `Authorizing` phase. Auth failures are handled separately by
 /// [`is_auth_error`] (they have a recovery path: re-login), so callers should
 /// check that first.
 #[cfg_attr(not(feature = "hosting"), allow(dead_code))]
@@ -260,6 +263,18 @@ pub fn is_fatal_connect_error(stderr: &str) -> bool {
     lower.contains("400 bad request")
         || lower.contains("cannot be changed")
         || lower.contains("invalid arguments")
+        || is_missing_tunnel_error(stderr)
+}
+
+/// Whether a host error means the tunnel itself no longer exists — `devtunnel
+/// token` reports "Tunnel not found" / a `404` for a deleted or expired tunnel.
+/// A strict subset of [`is_fatal_connect_error`]: the group should additionally
+/// be dropped from the persisted auto-host set, since re-hosting it on the next
+/// launch can never succeed.
+#[cfg_attr(not(feature = "hosting"), allow(dead_code))]
+pub fn is_missing_tunnel_error(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("not found") || lower.contains("404")
 }
 
 /// Runs `devtunnel user login` (interactive — opens the system browser and may
@@ -784,7 +799,8 @@ fn tunnel_ports(show: ShowResult) -> Vec<(u16, String)> {
 mod tests {
     use super::{
         anonymous_ace_args, classify_anonymous_access, classify_install_result, classify_user_show,
-        is_auth_error, parse_leading_int, parse_rate_bps, parse_size_bytes, sanitize_tunnel_id,
+        is_auth_error, is_fatal_connect_error, is_missing_tunnel_error, parse_leading_int,
+        parse_rate_bps, parse_size_bytes, sanitize_tunnel_id,
         tunnel_ports, update_expiration_args, InstallOutcome, ShowResult,
     };
 
@@ -1020,5 +1036,39 @@ mod tests {
         ));
         assert!(!is_auth_error("port number must be between 1 and 65535"));
         assert!(!is_auth_error("503 Service Unavailable"));
+    }
+
+    #[test]
+    fn fatal_on_request_validation_errors() {
+        assert!(is_fatal_connect_error("The request failed: 400 Bad Request"));
+        assert!(is_fatal_connect_error(
+            "the tunnel port protocol cannot be changed"
+        ));
+        assert!(is_fatal_connect_error("error: invalid arguments"));
+    }
+
+    #[test]
+    fn fatal_on_deleted_or_missing_tunnel() {
+        // A deleted/expired tunnel surfaces while minting the host token; retrying
+        // can never succeed, so it must stop instead of looping on `Authorizing`.
+        assert!(is_fatal_connect_error("Tunnel not found in brs: fancy-ocean"));
+        assert!(is_fatal_connect_error("The request was rejected: 404 Not Found"));
+    }
+
+    #[test]
+    fn not_fatal_on_transient_connect_errors() {
+        assert!(!is_fatal_connect_error("connection timed out"));
+        assert!(!is_fatal_connect_error("503 Service Unavailable"));
+        assert!(!is_fatal_connect_error("relay disconnected"));
+    }
+
+    #[test]
+    fn missing_tunnel_detects_deleted_or_expired() {
+        // Drives the auto-host prune: only a genuinely-gone tunnel, not every
+        // fatal error (a 400 protocol mismatch must keep the group).
+        assert!(is_missing_tunnel_error("Tunnel not found in brs: fancy-ocean"));
+        assert!(is_missing_tunnel_error("The request was rejected: 404 Not Found"));
+        assert!(!is_missing_tunnel_error("400 Bad Request"));
+        assert!(!is_missing_tunnel_error("the tunnel port protocol cannot be changed"));
     }
 }
