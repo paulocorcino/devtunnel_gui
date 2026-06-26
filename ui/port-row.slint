@@ -1,5 +1,5 @@
 // One port inside a GroupCard: status dot · port · protocol pill ·
-// prominent monospace URL (click-to-copy) · hover actions (copy ⧉, open ↗)
+// prominent monospace URL (click-to-open) · hover actions (copy ⧉)
 // and a de-emphasised delete action.
 import { Theme } from "theme.slint";
 import { Strings } from "strings.slint";
@@ -47,7 +47,7 @@ export component PortRow inherits Rectangle {
     // Including the buttons' own hover prevents the flicker that a bare
     // `hover.has-hover` produces when the pointer moves onto an action.
     property <bool> show-actions: hover.has-hover || copy-btn.hovered
-        || open-btn.hovered || del-btn.hovered || root.always-show-actions;
+        || del-btn.hovered || root.always-show-actions;
 
     height: Theme.row-height;
     background: root.selected
@@ -92,16 +92,16 @@ export component PortRow inherits Rectangle {
             Pill { text: pv.protocol == "" ? "—" : pv.protocol; }
         }
 
-        // The URL is the product: prominent, monospace, click-to-copy. Only the
-        // text itself copies on click; the trailing strip toggles the detail
-        // panel so metrics/logs stay reachable even when the URL is long.
+        // The URL is the product: prominent, monospace, click-to-open. Only the
+        // text itself opens in the browser on click; the trailing strip toggles
+        // the detail panel so metrics/logs stay reachable even when the URL is long.
         HorizontalLayout {
             horizontal-stretch: 1;
             url-area := TouchArea {
                 enabled: pv.url != "";
                 mouse-cursor: pv.url == "" ? MouseCursor.default : MouseCursor.pointer;
                 clicked => {
-                    root.copy-url(pv.url);
+                    root.open-url(pv.url);
                 }
                 Text {
                     text: pv.url == "" ? Strings.no-url : pv.url;
@@ -136,15 +136,6 @@ export component PortRow inherits Rectangle {
                     enabled: pv.url != "";
                     clicked => {
                         root.copy-url(pv.url);
-                    }
-                }
-                open-btn := IconButton {
-                    glyph: Theme.ico-open;
-                    tip: Strings.tooltip-open;
-                    revealed: root.show-actions;
-                    enabled: pv.url != "";
-                    clicked => {
-                        root.open-url(pv.url);
                     }
                 }
                 del-btn := IconButton {
