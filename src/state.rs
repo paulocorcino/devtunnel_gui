@@ -152,17 +152,52 @@ fn atomic_write(path: &Path, content: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Loads the cached rows from the last successful load. Missing or invalid
-/// content yields an empty list (the async refresh reconciles shortly after).
-pub fn load_row_cache() -> Vec<crate::devtunnel::Row> {
-    load_row_cache_from(&cache_path())
+/// Discard the instant-paint cache once it is older than this. The cache only
+/// exists to paint the last load immediately on a quick relaunch; after a long
+/// gap a tunnel deleted meanwhile would otherwise flash as a phantom row for the
+/// seconds the live `devtunnel list` takes to land, so we wait for the live load
+/// instead.
+const CACHE_MAX_AGE_SECS: u64 = 24 * 60 * 60;
+
+/// The row cache on disk: the last successful load plus when it was written, so
+/// a stale cache can be skipped on startup.
+#[derive(Debug, Serialize, Deserialize)]
+struct RowCache {
+    /// Unix seconds at write time.
+    saved_at: u64,
+    rows: Vec<crate::devtunnel::Row>,
 }
 
-fn load_row_cache_from(path: &Path) -> Vec<crate::devtunnel::Row> {
-    match fs::read_to_string(path) {
-        Ok(text) => serde_json::from_str(&text).unwrap_or_default(),
-        Err(_) => Vec::new(),
+/// Current wall-clock time in Unix seconds (0 if the clock predates the epoch).
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Loads the cached rows from the last successful load. Missing, invalid, or
+/// stale content yields an empty list (the async refresh reconciles shortly
+/// after).
+pub fn load_row_cache() -> Vec<crate::devtunnel::Row> {
+    load_row_cache_from(&cache_path(), now_unix_secs())
+}
+
+fn load_row_cache_from(path: &Path, now: u64) -> Vec<crate::devtunnel::Row> {
+    let Ok(text) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    // An unparseable (or pre-timestamp) cache is simply ignored; the live load
+    // rewrites it in the new format.
+    let Ok(cache) = serde_json::from_str::<RowCache>(&text) else {
+        return Vec::new();
+    };
+    // Skip a cache past its TTL. `saturating_sub` also drops a cache with a
+    // future timestamp (clock skew), which would otherwise look fresh forever.
+    if now.saturating_sub(cache.saved_at) > CACHE_MAX_AGE_SECS {
+        return Vec::new();
     }
+    cache.rows
 }
 
 /// Persists the rows of a successful load so the next startup can paint the
@@ -172,7 +207,11 @@ pub fn save_row_cache(rows: &[crate::devtunnel::Row]) {
 }
 
 fn save_row_cache_to(path: &Path, rows: &[crate::devtunnel::Row]) {
-    let result = serde_json::to_string(rows)
+    let cache = RowCache {
+        saved_at: now_unix_secs(),
+        rows: rows.to_vec(),
+    };
+    let result = serde_json::to_string(&cache)
         .map_err(anyhow::Error::from)
         .and_then(|json| atomic_write(path, &json));
     if let Err(e) = result {
@@ -262,7 +301,7 @@ mod tests {
 
         // Missing file -> empty list.
         let _ = fs::remove_file(&path);
-        assert!(load_row_cache_from(&path).is_empty());
+        assert!(load_row_cache_from(&path, now_unix_secs()).is_empty());
 
         let rows = vec![crate::devtunnel::Row {
             group: "frontend".into(),
@@ -274,14 +313,20 @@ mod tests {
             host_connections: 0,
         }];
         save_row_cache_to(&path, &rows);
-        let loaded = load_row_cache_from(&path);
+        let loaded = load_row_cache_from(&path, now_unix_secs());
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].tunnel_id, "frontend.brs");
         assert_eq!(loaded[0].port, 3000);
 
-        // Invalid content -> empty list.
+        // Past the TTL -> skipped so a deleted tunnel cannot flash on startup.
+        let stale = now_unix_secs() + CACHE_MAX_AGE_SECS + 1;
+        assert!(load_row_cache_from(&path, stale).is_empty());
+
+        // Invalid content (and the old pre-timestamp array format) -> empty list.
         fs::write(&path, "garbage").unwrap();
-        assert!(load_row_cache_from(&path).is_empty());
+        assert!(load_row_cache_from(&path, now_unix_secs()).is_empty());
+        fs::write(&path, r#"[{"tunnel_id":"x.brs","port":1}]"#).unwrap();
+        assert!(load_row_cache_from(&path, now_unix_secs()).is_empty());
     }
 
     #[test]
