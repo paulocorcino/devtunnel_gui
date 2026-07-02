@@ -138,6 +138,12 @@ relogin-message = Sign-in expired — sign in again to keep hosting
 btn-sign-in = Sign in
 banner-action-open-settings = Open Settings
 
+## Update available banner
+update-banner-title = Update available
+update-banner-body = Version { $version } is available — you're on an older build.
+btn-update-download = View release
+btn-update-ignore = Ignore
+
 ## Install CLI progress / outcome
 install-status-running = Installing…
 install-status-done = Dev Tunnels CLI installed

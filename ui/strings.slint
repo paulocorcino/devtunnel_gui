@@ -151,6 +151,13 @@ export global Strings {
     in property <string> btn-sign-in: "Sign in";
     in property <string> banner-action-open-settings: "Open Settings";
 
+    // Update available banner (update-banner-body is filled from Rust with the
+    // release version, so it has no static default).
+    in property <string> update-banner-title: "Update available";
+    in property <string> update-banner-body;
+    in property <string> btn-update-download: "View release";
+    in property <string> btn-update-ignore: "Ignore";
+
     // Install CLI progress / outcome
     in property <string> install-status-running: "Installing…";
     in property <string> install-status-done: "Dev Tunnels CLI installed";

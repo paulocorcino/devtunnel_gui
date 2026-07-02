@@ -31,6 +31,10 @@ pub struct Settings {
     /// Minimum severity shown in the port-detail Logs tab: one of
     /// `error`/`warn`/`info`/`debug`. Defaults to `info` (Debug chatter hidden).
     pub log_level: String,
+    /// A release the user chose to ignore via the update banner's "Ignore"
+    /// button (the release tag, e.g. `v0.2.0`). The banner stays hidden for
+    /// exactly this version; a later release still notifies. Empty = none.
+    pub skipped_update: String,
 }
 
 impl Default for Settings {
@@ -45,6 +49,8 @@ impl Default for Settings {
             dark: None,
             // Show info and above by default; users can widen to debug.
             log_level: "info".to_string(),
+            // No release ignored until the user clicks "Ignore" on the banner.
+            skipped_update: String::new(),
         }
     }
 }

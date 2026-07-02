@@ -1,0 +1,63 @@
+// In-app banner shown at the top of the window when a newer GitHub release is
+// available. Unlike the PreflightBanner it is not tied to the app-state enum —
+// it is gated by its own `update-available` flag and can show while ready.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+
+export component UpdateBanner inherits Rectangle {
+    // Release page opened when the user clicks the action button (Rust reads it
+    // back from the window; kept here only for symmetry / future use).
+    in property <string> url;
+    // User clicked "View release" — Rust opens the release page in the browser.
+    callback view-release();
+    // User clicked "Ignore" — Rust remembers this version and hides the banner.
+    callback ignore-update();
+
+    background: Theme.surface;
+
+    VerticalLayout {
+        HorizontalLayout {
+            padding: Theme.pad;
+            spacing: Theme.gap;
+
+            VerticalLayout {
+                spacing: 2px;
+                alignment: center;
+                Text {
+                    text: Strings.update-banner-title;
+                    color: Theme.accent;
+                    font-size: Theme.fs-section;
+                    font-weight: 700;
+                }
+                Text {
+                    text: Strings.update-banner-body;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: Theme.gap-sm;
+                TxtButton {
+                    text: Strings.btn-update-download;
+                    primary: true;
+                    clicked => {
+                        root.view-release();
+                    }
+                }
+                TxtButton {
+                    text: Strings.btn-update-ignore;
+                    clicked => {
+                        root.ignore-update();
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+    }
+}
