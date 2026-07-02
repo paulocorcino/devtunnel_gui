@@ -7,7 +7,9 @@
 
 use log::{Level, LevelFilter, Log, Metadata, Record};
 use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::io::Write;
+use std::sync::mpsc::{sync_channel, SyncSender};
+use std::sync::{Mutex, OnceLock};
 
 /// Maximum number of captured lines kept in memory.
 const CAPACITY: usize = 500;
@@ -56,6 +58,47 @@ impl Ring {
 }
 
 static RING: Mutex<Ring> = Mutex::new(Ring::new(CAPACITY));
+
+/// Bounded, non-blocking sink to a dedicated stderr writer thread.
+///
+/// Teeing every record straight to stderr with `eprintln!` was a multi-day
+/// freeze bug: `eprintln!` is a *blocking* write serialized by the global stderr
+/// lock. When the app is launched from a terminal and that console pauses output
+/// (a QuickEdit text selection) or its pipe backs up, the writing thread stalls
+/// *holding the lock*; the next thread to log — eventually the UI thread — blocks
+/// on it and the whole event loop freezes while the process stays alive.
+///
+/// The writer thread owns the only blocking `writeln!`; every `log()` call just
+/// `try_send`s the formatted line and drops it when the channel is full. A stuck
+/// console can therefore stall at most this one background thread and cost a few
+/// dropped log lines — never the UI thread.
+static SINK: OnceLock<SyncSender<String>> = OnceLock::new();
+
+/// Capacity of the stderr writer channel. While the console is paused, lines
+/// beyond this are dropped rather than blocking (or unboundedly growing) the
+/// threads that emit them.
+const SINK_CAPACITY: usize = 1024;
+
+/// Spawns the background stderr writer thread and stores its non-blocking sender.
+/// First caller wins (subsequent calls are no-ops); safe to call once from
+/// [`CaptureLogger::install`].
+fn init_stderr_writer() {
+    let (tx, rx) = sync_channel::<String>(SINK_CAPACITY);
+    if SINK.set(tx).is_err() {
+        return; // already initialized
+    }
+    let _ = std::thread::Builder::new()
+        .name("devtunnel-log-writer".to_string())
+        .spawn(move || {
+            let mut out = std::io::stderr();
+            // A blocking write here (paused/stuck console) stalls only this
+            // thread; the bounded channel drops new lines meanwhile, so no
+            // logging thread ever waits on stderr.
+            while let Ok(line) = rx.recv() {
+                let _ = writeln!(out, "{line}");
+            }
+        });
+}
 
 /// Appends a record to the process-wide ring buffer.
 /// Dormant in v0.1.0 (Logs-tab capture disabled); kept for re-enable + tests.
@@ -128,6 +171,8 @@ impl CaptureLogger {
     /// Installs `self` as the global logger and sets the max level to the most
     /// verbose directive. Errors only if a logger is already installed.
     pub fn install(self) -> Result<(), log::SetLoggerError> {
+        // Start the decoupled stderr writer before any record can be emitted.
+        init_stderr_writer();
         let max = self
             .directives
             .iter()
@@ -166,7 +211,12 @@ impl Log for CaptureLogger {
         let message = record.args().to_string();
         // Technical/diagnostic content — intentionally not localized.
         let line = format!("{:<5} {} — {}", record.level(), record.target(), message);
-        eprintln!("{line}");
+        // Hand the line to the writer thread without ever blocking: a full
+        // channel (paused/stuck console) drops the line instead of stalling this
+        // — possibly the UI — thread. See `SINK` for why this matters.
+        if let Some(sink) = SINK.get() {
+            let _ = sink.try_send(line);
+        }
         // Logs-tab capture DISABLED for stability (v0.1.0): the detail panel's
         // Logs view is turned off, so records are no longer accumulated in the
         // ring (only stderr above is kept). Restore with the panel.
