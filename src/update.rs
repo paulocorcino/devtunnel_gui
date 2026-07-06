@@ -9,22 +9,29 @@
 //! on the next tick — they never surface to the user or block the UI.
 
 use std::sync::mpsc::Sender;
+#[cfg(not(feature = "store"))]
 use std::time::Duration;
 
 /// GitHub Releases API for this repo's latest (non-prerelease) release.
+#[cfg(not(feature = "store"))]
 const RELEASES_API: &str =
     "https://api.github.com/repos/paulocorcino/devtunnel_gui/releases/latest";
 
 /// Public release page, used as the click target when the API omits `html_url`.
+#[cfg(not(feature = "store"))]
 const RELEASES_PAGE: &str = "https://github.com/paulocorcino/devtunnel_gui/releases/latest";
 
 /// How often to re-check after the initial startup check. The app is a tray
 /// app that can stay open for days, so a one-shot startup check could never
 /// fire for long-running instances.
+#[cfg(not(feature = "store"))]
 const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// A release newer than the running build, pumped to the UI thread.
 #[derive(Clone, Debug)]
+// In `store` builds the checker is a no-op, so the fields are never read; the
+// type is still referenced by `spawn`'s channel signature.
+#[cfg_attr(feature = "store", allow(dead_code))]
 pub struct UpdateInfo {
     /// The release tag, as published (e.g. `v0.2.0`).
     pub version: String,
@@ -35,6 +42,14 @@ pub struct UpdateInfo {
 /// Spawns the background update checker. Sends an `UpdateInfo` on the channel
 /// whenever the latest release is newer than the running build, then sleeps
 /// until the next check. Stops when the receiver is dropped (UI shut down).
+#[cfg(feature = "store")]
+pub fn spawn(_tx: Sender<UpdateInfo>) {
+    // Store (MSIX) builds are updated through the Microsoft Store, not GitHub
+    // Releases. Self-directed update prompts are against Store policy, so the
+    // checker is compiled out entirely — the banner never fires.
+}
+
+#[cfg(not(feature = "store"))]
 pub fn spawn(tx: Sender<UpdateInfo>) {
     // Test hook: force the banner without a live release. `DEVTUNNEL_FAKE_UPDATE`
     // is the tag to advertise (e.g. `v9.9.9`); the URL points at the releases
@@ -64,6 +79,7 @@ pub fn spawn(tx: Sender<UpdateInfo>) {
 
 /// Queries the GitHub API for the latest release. Returns `Ok(None)` when the
 /// response carries no usable tag.
+#[cfg(not(feature = "store"))]
 fn check_latest() -> anyhow::Result<Option<UpdateInfo>> {
     let resp = ureq::get(RELEASES_API)
         // GitHub rejects requests without a User-Agent.
@@ -94,6 +110,7 @@ fn check_latest() -> anyhow::Result<Option<UpdateInfo>> {
 /// (e.g. `v0.2.0`, `0.1.0+g05b8b3c-dirty`); only MAJOR.MINOR.PATCH is compared.
 /// Anything that cannot be parsed is treated as not-newer (fail closed), so a
 /// malformed tag never triggers a spurious "update available".
+#[cfg(not(feature = "store"))]
 fn is_newer(candidate: &str, current: &str) -> bool {
     match (parse_semver(candidate), parse_semver(current)) {
         (Some(c), Some(cur)) => c > cur,
@@ -104,6 +121,7 @@ fn is_newer(candidate: &str, current: &str) -> bool {
 /// Extracts `(major, minor, patch)` from a version string, ignoring a leading
 /// `v` and any `-`/`+` suffix. Missing minor/patch default to 0. Returns `None`
 /// if the numeric core is absent or non-numeric.
+#[cfg(not(feature = "store"))]
 fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     let core = s.trim().trim_start_matches(['v', 'V']);
     let core = core.split(['-', '+']).next().unwrap_or("");
@@ -114,7 +132,7 @@ fn parse_semver(s: &str) -> Option<(u64, u64, u64)> {
     Some((major, minor, patch))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(feature = "store")))]
 mod tests {
     use super::*;
 

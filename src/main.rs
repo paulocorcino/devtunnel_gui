@@ -1745,6 +1745,9 @@ fn build_tray_menu(
 /// Call once after constructing `AppWindow`, before showing the UI.
 fn apply_strings(app: &AppWindow, loc: &Locale) {
     let s = app.global::<Strings>();
+    // Store (MSIX) builds hide the self-install / uninstall / auto-start controls;
+    // the package manages those. Compile-time constant so it is stripped in each build.
+    s.set_store_build(cfg!(feature = "store"));
     s.set_status_loading(loc.t("status-loading").into());
     s.set_status_refreshing(loc.t("status-refreshing").into());
     s.set_btn_refresh(loc.t("btn-refresh").into());

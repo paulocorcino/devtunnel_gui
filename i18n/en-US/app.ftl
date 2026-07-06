@@ -119,7 +119,7 @@ confirm-uninstall = Uninstall DevTunnel GUI? This removes the Start-menu shortcu
 
 ## About
 about-title = About
-about-app-name = Dev Tunnels GUI
+about-app-name = Dev Tunnels Manager
 about-version-label = Version
 about-tagline = Manage Microsoft Dev Tunnels from your Windows tray.
 about-built-on = Built on Microsoft Dev Tunnels — Microsoft's free, security-focused tunneling service — and its official CLI and SDK. Not affiliated with or endorsed by Microsoft.
@@ -172,7 +172,7 @@ badge-stopped = Stopped
 badge-hosting = Hosting…
 
 ## Top bar (redesign)
-app-title = Dev Tunnels
+app-title = Dev Tunnels Manager
 pill-connected = Connected
 tooltip-settings = Toggle dark mode
 
