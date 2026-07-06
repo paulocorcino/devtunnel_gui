@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Privacy Policy — TunnelDeck for Dev Tunnels</title>
+  <meta name="description" content="Privacy policy for TunnelDeck for Dev Tunnels, a Windows desktop client for Microsoft Dev Tunnels.">
+  <style>
+    :root {
+      --bg: #ffffff; --fg: #1f2328; --muted: #57606a;
+      --accent: #4f46e5; --border: #d0d7de; --card: #f6f8fa;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117; --fg: #e6edf3; --muted: #9198a1;
+        --accent: #6c6ff5; --border: #30363d; --card: #161b22;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--fg);
+      font: 16px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 48px 24px 80px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 20px; margin-bottom: 8px; }
+    h1 { font-size: 1.7rem; margin: 0 0 4px; }
+    h2 { font-size: 1.15rem; margin: 32px 0 8px; }
+    .updated { color: var(--muted); font-size: .9rem; }
+    p, li { color: var(--fg); }
+    a { color: var(--accent); }
+    .summary {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px 20px; margin: 20px 0;
+    }
+    code { background: var(--card); padding: 1px 6px; border-radius: 5px; font-size: .9em; }
+    footer { margin-top: 48px; color: var(--muted); font-size: .85rem; border-top: 1px solid var(--border); padding-top: 16px; }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>Privacy Policy</h1>
+      <div class="updated">TunnelDeck for Dev Tunnels · Last updated: 2026-07-06</div>
+    </header>
+
+    <p>TunnelDeck for Dev Tunnels (&ldquo;TunnelDeck&rdquo;, &ldquo;the app&rdquo;)
+    is a Windows desktop client for Microsoft Dev Tunnels, published by
+    Paulo Corcino (&ldquo;we&rdquo;, &ldquo;us&rdquo;). This policy explains what
+    the app does and does not do with your data.</p>
+
+    <div class="summary">
+      <strong>Summary.</strong> We do not collect, store, or transmit any personal
+      data to us. TunnelDeck has no analytics, no advertising, and no
+      developer-operated servers. It runs entirely on your machine and talks only
+      to Microsoft&rsquo;s services on your behalf.
+    </div>
+
+    <h2>What the app does</h2>
+    <ul>
+      <li><strong>Sign-in and tunnels.</strong> TunnelDeck uses the official
+      Microsoft Dev Tunnels CLI and SDK to sign you in and to create, list, host,
+      and delete tunnels. You authenticate directly with Microsoft (Microsoft
+      account, Microsoft Entra ID, or GitHub). Your credentials and tokens are
+      handled by Microsoft&rsquo;s tooling and are never sent to us.</li>
+      <li><strong>Local settings.</strong> Your preferences (such as default
+      expiration, log level, and probe interval) are stored locally on your
+      computer. They never leave your machine.</li>
+      <li><strong>Network traffic.</strong> When you host a tunnel, traffic between
+      the public URL and your local service transits Microsoft&rsquo;s Dev Tunnels
+      infrastructure, subject to Microsoft&rsquo;s own terms and privacy practices.
+      TunnelDeck does not intercept, log, or forward that traffic to us.</li>
+    </ul>
+
+    <h2>Data we collect</h2>
+    <p>None. TunnelDeck contains no telemetry, crash reporting, analytics, or
+    advertising SDKs. We operate no servers that receive data from the app.</p>
+
+    <h2>Third-party services</h2>
+    <ul>
+      <li><strong>Microsoft Dev Tunnels</strong> — the tunneling service the app is
+      built on. Your use of it is governed by Microsoft&rsquo;s terms and privacy
+      statement:
+      <a href="https://learn.microsoft.com/azure/developer/dev-tunnels/security">learn.microsoft.com/azure/developer/dev-tunnels/security</a>.</li>
+      <li><strong>Microsoft Store</strong> — handles app distribution and updates,
+      and may collect usage and diagnostic data under Microsoft&rsquo;s privacy
+      statement, independently of this app.</li>
+    </ul>
+
+    <h2>Your responsibility</h2>
+    <p>Tunnels you create expose a service running on your computer to the
+    internet. What that service returns is under your control. Keep tunnels private
+    and short-lived unless you intend them to be public.</p>
+
+    <h2>Children&rsquo;s privacy</h2>
+    <p>TunnelDeck is a developer tool and is not directed at children. It collects
+    no personal information from anyone.</p>
+
+    <h2>Changes</h2>
+    <p>We may update this policy; the &ldquo;Last updated&rdquo; date above reflects
+    the current version.</p>
+
+    <h2>Contact</h2>
+    <p>Questions about this policy: <a href="mailto:paulo@corcino.com.br">paulo@corcino.com.br</a></p>
+
+    <footer>
+      TunnelDeck is an independent client built on top of the official Microsoft
+      Dev Tunnels service. It is not affiliated with, sponsored by, or endorsed by
+      Microsoft.
+    </footer>
+  </main>
+</body>
+</html>

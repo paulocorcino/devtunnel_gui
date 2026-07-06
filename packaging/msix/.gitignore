@@ -2,3 +2,7 @@
 /layout/
 /out/
 /Assets/
+
+# Local identity + test certs — never commit.
+.env
+*.pfx

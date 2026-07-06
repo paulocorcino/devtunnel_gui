@@ -49,14 +49,17 @@
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory)] [string] $IdentityName,
-    [Parameter(Mandatory)] [string] $PublisherId,
-    [Parameter(Mandatory)] [string] $PublisherDisplayName,
-    [string] $Version = "0.1.0.0",
+    [string] $IdentityName,
+    [string] $PublisherId,
+    [string] $PublisherDisplayName,
+    [string] $Version,
     [switch] $Sign,
     [string] $CertPath,
     [string] $CertPassword,
-    [switch] $Wack
+    [switch] $Wack,
+    # .env file with the Partner Center identity values. Any parameter you pass
+    # explicitly wins over the file.
+    [string] $EnvFile
 )
 
 $ErrorActionPreference = "Stop"
@@ -64,7 +67,38 @@ $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Resolve-Path (Join-Path $scriptDir "..\..")
 $layout    = Join-Path $scriptDir "layout"
 $outDir    = Join-Path $scriptDir "out"
-$msixPath  = Join-Path $outDir "TunnelDeck-$Version.msix"
+
+# --- Load identity from .env (parameters passed explicitly take precedence) ----
+# Fill in packaging\msix\.env (copy from .env.example) so you can just run
+# `.\build-msix.ps1` with no arguments.
+if (-not $EnvFile) { $EnvFile = Join-Path $scriptDir ".env" }
+$envMap = @{}
+if (Test-Path $EnvFile) {
+    Write-Host "Loading identity from $EnvFile"
+    foreach ($line in Get-Content $EnvFile) {
+        $t = $line.Trim()
+        if ($t -eq "" -or $t.StartsWith("#")) { continue }
+        $kv = $t -split '=', 2
+        if ($kv.Count -eq 2) { $envMap[$kv[0].Trim()] = $kv[1].Trim().Trim('"') }
+    }
+}
+if (-not $IdentityName)         { $IdentityName         = $envMap["IDENTITY_NAME"] }
+if (-not $PublisherId)          { $PublisherId          = $envMap["PUBLISHER_ID"] }
+if (-not $PublisherDisplayName) { $PublisherDisplayName = $envMap["PUBLISHER_DISPLAY_NAME"] }
+if (-not $Version)              { $Version              = $envMap["VERSION"] }
+if (-not $CertPath)             { $CertPath             = $envMap["CERT_PATH"] }
+if (-not $CertPassword)         { $CertPassword         = $envMap["CERT_PASSWORD"] }
+if (-not $Version)              { $Version              = "0.1.0.0" }
+
+$missing = @()
+if (-not $IdentityName)         { $missing += "IdentityName / IDENTITY_NAME" }
+if (-not $PublisherId)          { $missing += "PublisherId / PUBLISHER_ID" }
+if (-not $PublisherDisplayName) { $missing += "PublisherDisplayName / PUBLISHER_DISPLAY_NAME" }
+if ($missing.Count -gt 0) {
+    throw "Missing identity value(s): $($missing -join ', '). Set them in $EnvFile (copy .env.example) or pass as parameters. Get them from Partner Center > Product identity."
+}
+
+$msixPath = Join-Path $outDir "TunnelDeck-$Version.msix"
 
 if ($Version -notmatch '^\d+\.\d+\.\d+\.0$') {
     throw "Version must be a.b.c.0 (the 4th part must be 0 for the Store); got '$Version'."
@@ -120,7 +154,9 @@ $manifest = Get-Content (Join-Path $scriptDir "AppxManifest.xml") -Raw
 $manifest = $manifest.Replace("__IDENTITY_NAME__", $IdentityName)
 $manifest = $manifest.Replace("__PUBLISHER_ID__", $PublisherId)
 $manifest = $manifest.Replace("__PUBLISHER_DISPLAY_NAME__", $PublisherDisplayName)
-$manifest = $manifest -replace 'Version="[\d.]+"', "Version=`"$Version`""
+# Case-sensitive so it targets Identity's Version="..." and NOT the lowercase
+# version="1.0" in the <?xml ... ?> declaration.
+$manifest = $manifest -creplace 'Version="[\d.]+"', "Version=`"$Version`""
 Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $manifest -Encoding UTF8
 
 # --- 4. Pack -----------------------------------------------------------------

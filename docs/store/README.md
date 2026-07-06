@@ -46,17 +46,18 @@ cargo build --release --features store --bin devtunnel_gui
 
 ## Step 3 — Fill in the manifest identity & package
 
-`build-msix.ps1` does everything: builds the exe, renders `Assets\`, substitutes
-the identity into the manifest, and packs the `.msix`.
+Put the three Partner Center identity values into a `.env` file (gitignored), then
+run the script with no arguments. `build-msix.ps1` builds the exe, renders
+`Assets\`, substitutes the identity into the manifest, and packs the `.msix`.
 
 ```powershell
 cd packaging\msix
-.\build-msix.ps1 `
-  -IdentityName        "<Package/Identity/Name from Partner Center>" `
-  -PublisherId         "<CN=... from Partner Center>" `
-  -PublisherDisplayName "<Publisher display name>" `
-  -Version             0.1.0.0
+Copy-Item .env.example .env
+notepad .env      # fill IDENTITY_NAME, PUBLISHER_ID, PUBLISHER_DISPLAY_NAME
+.\build-msix.ps1
 ```
+
+(You can still override any value on the command line, e.g. `-Version 0.2.0.0`.)
 
 Output: `packaging\msix\out\TunnelDeck-0.1.0.0.msix` (**unsigned** — correct for
 submission; the Store re-signs it).
@@ -102,8 +103,10 @@ In Partner Center, on the reserved product:
 2. **Store listing** — paste everything from [`listing.md`](listing.md):
    name, short + full description, features, search terms, category
    (Developer tools), copyright, support email, and screenshots (≥ 1, 1366×768+).
-3. **Privacy policy URL** — publish [`privacy-policy.md`](privacy-policy.md)
-   somewhere public (e.g. GitHub Pages / the repo) and paste the URL. Required.
+3. **Privacy policy URL** — `https://paulocorcino.github.io/devtunnel_gui/`.
+   The `Deploy Pages` workflow publishes [`site/index.html`](site/index.html)
+   (mirror of [`privacy-policy.md`](privacy-policy.md)). One-time: repo
+   **Settings → Pages → Source = GitHub Actions**. Required field.
 4. **Age ratings** — complete the IARC questionnaire (see `listing.md`; expected
    result: Everyone / PEGI 3).
 5. **Pricing and availability** — Free; pick markets.

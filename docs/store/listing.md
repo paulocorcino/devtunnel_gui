@@ -113,7 +113,9 @@ Developer tools
 - **Copyright:** `© 2026 Paulo Corcino`
 - **Website:** your GitHub repo or project page (e.g. https://github.com/paulocorcino/devtunnel_gui)
 - **Support contact:** paulo@corcino.com.br
-- **Privacy policy URL:** required — publish `docs/store/privacy-policy.md` (see below) and paste its public URL.
+- **Privacy policy URL:** `https://paulocorcino.github.io/devtunnel_gui/` — served
+  from `docs/store/site/index.html` by the `Deploy Pages` workflow (enable Pages =
+  GitHub Actions once). Required field.
 
 ## What's new in this version (release notes)
 
@@ -135,8 +137,17 @@ Capture from the running app (light and/or dark theme):
 4. Settings (General) — probe interval, default expiration, log level.
 5. About panel (shows the Microsoft attribution + disclaimer).
 
-Tip: capture at 1920 × 1080 for crisp thumbnails. Store store-side scaling handles
-the rest. Add a one-line caption per screenshot in Partner Center.
+Use the helper (from your signed-in session, with the window open — the app
+starts in the tray, so click the tray icon first):
+
+```powershell
+packaging\msix\capture-screenshots.ps1 -Name 01-main
+packaging\msix\capture-screenshots.ps1 -Name 02-create
+packaging\msix\capture-screenshots.ps1 -Name 03-settings
+```
+
+It composes the window, centred, on a 1920×1080 indigo canvas and writes to
+`docs/store/screenshots/`. Add a one-line caption per screenshot in Partner Center.
 
 ## Age rating (IARC questionnaire)
 
