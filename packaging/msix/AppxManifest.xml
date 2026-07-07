@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MSIX package manifest for the Microsoft Store build of TunnelDeck for Dev Tunnels.
+
+  The three PLACEHOLDER values below come from Partner Center once the app name is
+  reserved (Product > Product identity):
+    * Identity/@Name            -> "Package/Identity/Name"
+    * Identity/@Publisher       -> "Package/Identity/Publisher" (the CN=... string)
+    * Properties/PublisherDisplayName -> "Publisher display name"
+  build-msix.ps1 substitutes them from parameters / env so this file stays generic.
+
+  Packaged full-trust Win32 app (EntryPoint=Windows.FullTrustApplication + the
+  runFullTrust restricted capability). Auto-start is declared via the
+  windows.startupTask extension with Enabled="false": the user opts in from
+  Windows Settings > Startup apps (the in-app HKCU toggle is compiled out of the
+  `store` build). See docs/store/README.md.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap5="http://schemas.microsoft.com/appx/manifest/uap/windows10/5"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap5 rescap">
+
+  <Identity
+    Name="__IDENTITY_NAME__"
+    Publisher="__PUBLISHER_ID__"
+    Version="0.1.0.0"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>TunnelDeck for Dev Tunnels</DisplayName>
+    <PublisherDisplayName>__PUBLISHER_DISPLAY_NAME__</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <!-- 10.0.17763.0 (Windows 10 1809) is the first build with the uap5
+         windows.startupTask extension used below. -->
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-US" />
+  </Resources>
+
+  <Applications>
+    <Application Id="TunnelDeck" Executable="devtunnel_gui.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="TunnelDeck for Dev Tunnels"
+        Description="Manage Microsoft Dev Tunnels from your Windows tray — one tap to a public HTTPS URL."
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png">
+        <uap:DefaultTile
+          Wide310x150Logo="Assets\Wide310x150Logo.png"
+          Square71x71Logo="Assets\Square71x71Logo.png"
+          Square310x310Logo="Assets\Square310x310Logo.png" />
+      </uap:VisualElements>
+
+      <Extensions>
+        <!-- Start with Windows, user-controlled. Enabled="false" means it stays
+             off until the user turns it on in Windows Settings > Startup apps, so
+             the package never silently auto-launches after install. -->
+        <uap5:Extension
+          Category="windows.startupTask"
+          Executable="devtunnel_gui.exe"
+          EntryPoint="Windows.FullTrustApplication">
+          <uap5:StartupTask
+            TaskId="TunnelDeckStartup"
+            Enabled="false"
+            DisplayName="TunnelDeck for Dev Tunnels" />
+        </uap5:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <!-- Required for any packaged full-trust desktop (Win32) application. -->
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

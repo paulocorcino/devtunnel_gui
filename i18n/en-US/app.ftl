@@ -119,7 +119,7 @@ confirm-uninstall = Uninstall DevTunnel GUI? This removes the Start-menu shortcu
 
 ## About
 about-title = About
-about-app-name = Dev Tunnels GUI
+about-app-name = TunnelDeck for Dev Tunnels
 about-version-label = Version
 about-tagline = Manage Microsoft Dev Tunnels from your Windows tray.
 about-built-on = Built on Microsoft Dev Tunnels — Microsoft's free, security-focused tunneling service — and its official CLI and SDK. Not affiliated with or endorsed by Microsoft.
@@ -137,6 +137,12 @@ banner-relogin-body = Your Dev Tunnels login is missing or has expired. Sign in 
 relogin-message = Sign-in expired — sign in again to keep hosting
 btn-sign-in = Sign in
 banner-action-open-settings = Open Settings
+
+## Update available banner
+update-banner-title = Update available
+update-banner-body = Version { $version } is available — you're on an older build.
+btn-update-download = View release
+btn-update-ignore = Ignore
 
 ## Install CLI progress / outcome
 install-status-running = Installing…
@@ -166,7 +172,7 @@ badge-stopped = Stopped
 badge-hosting = Hosting…
 
 ## Top bar (redesign)
-app-title = Dev Tunnels
+app-title = TunnelDeck
 pill-connected = Connected
 tooltip-settings = Toggle dark mode
 

@@ -28,9 +28,13 @@ log = "0.4"
 tunnels = { git = "https://github.com/microsoft/dev-tunnels", features = ["connections", "vendored-openssl"], optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 env_logger = { version = "0.11", optional = true }
-# Blocking HTTP client for the health probe (issue #4). rustls avoids a native
-# OpenSSL dependency for the probe itself. Optional: only pulled by `hosting`.
-ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
+# Blocking HTTP client. Used by the startup update checker (GitHub Releases) in
+# every build, and by the health probe in the `hosting` build. rustls avoids a
+# native OpenSSL dependency, keeping the default build light.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+# PNG encoder for the MSIX visual assets. Only pulled in by the `store` feature,
+# which builds the `gen_msix_assets` helper bin; the GUI itself never links it.
+ico = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 # Initial dark-mode detection: read the Windows "apps use light theme" setting.
@@ -48,7 +52,19 @@ spike = ["dep:tunnels", "dep:tokio", "dep:env_logger"]
 # `cargo build` stays light (no vendored OpenSSL / heavy toolchain).
 # env_logger is no longer needed here: the GUI installs its own capturing
 # logger (src/logbuf.rs) in every build. The spike bin still uses env_logger.
-hosting = ["dep:tunnels", "dep:tokio", "dep:ureq"]
+hosting = ["dep:tunnels", "dep:tokio"]
+# Microsoft Store (MSIX) build. The MSIX container virtualizes the registry and
+# filesystem and manages install/update itself, so the self-install relocation,
+# the HKCU Run-key auto-start, and the GitHub-Releases update checker are all
+# either broken or against Store policy inside the package. This feature compiles
+# them out: install/update are handled by the MSIX package, and auto-start is
+# declared via the `windows.startupTask` manifest extension (user-managed in
+# Windows Settings > Startup apps). See docs/store/README.md.
+#
+# `store` always pulls in `hosting`: the Host button is core to the product, so a
+# Store build without it makes no sense. Building it needs NASM + Strawberry Perl
+# on PATH (vendored OpenSSL) — see CLAUDE.md.
+store = ["dep:ico", "hosting"]
 
 [[bin]]
 name = "devtunnel_gui"
@@ -58,6 +74,18 @@ path = "src/main.rs"
 name = "host_spike"
 path = "src/bin/host_spike.rs"
 required-features = ["spike"]
+
+[[bin]]
+name = "two_host_probe"
+path = "src/bin/two_host_probe.rs"
+required-features = ["spike"]
+
+# Renders the MSIX visual assets (tile/logo PNGs) from the procedural app icon so
+# the Store package's Assets\ folder is reproducible. Run via packaging/msix/build-msix.ps1.
+[[bin]]
+name = "gen_msix_assets"
+path = "src/bin/gen_msix_assets.rs"
+required-features = ["store"]
 
 [build-dependencies]
 slint-build = "1.13"

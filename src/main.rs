@@ -16,6 +16,7 @@ mod model;
 #[cfg(feature = "hosting")]
 mod probe;
 mod state;
+mod update;
 mod view;
 
 slint::include_modules!();
@@ -247,6 +248,13 @@ fn main() -> anyhow::Result<()> {
     let (host_evt_tx, host_evt_rx) = std::sync::mpsc::channel::<host::HostEvent>();
     let tunnel_host = host::spawn(host_evt_tx);
 
+    // ---- Update checker ----
+    // A background thread polls GitHub Releases (startup + every 24 h) and pumps
+    // an UpdateInfo when a newer version than this build is published; the UI
+    // pump then shows the in-app update banner.
+    let (update_tx, update_rx) = std::sync::mpsc::channel::<update::UpdateInfo>();
+    update::spawn(update_tx);
+
     #[cfg(feature = "hosting")]
     let (probe_evt_rx, probe_cmd_tx) = {
         let (probe_evt_tx, probe_evt_rx) = std::sync::mpsc::channel::<probe::ProbeEvent>();
@@ -320,6 +328,28 @@ fn main() -> anyhow::Result<()> {
             std::thread::spawn(move || {
                 let _ = install_tx.send(devtunnel::install_cli());
             });
+        });
+    }
+    // ---- Update banner: open the release page in the browser ----
+    {
+        let weak = app.as_weak();
+        app.on_open_update_url(move || {
+            if let Some(a) = weak.upgrade() {
+                open_browser(&a.get_update_url());
+            }
+        });
+    }
+    // ---- Update banner: ignore this version (persist + hide the banner) ----
+    {
+        let weak = app.as_weak();
+        let app_state = app_state.clone();
+        app.on_ignore_update(move || {
+            if let Some(a) = weak.upgrade() {
+                let mut st = app_state.borrow_mut();
+                st.settings.skipped_update = a.get_update_version().to_string();
+                st.save();
+                a.set_update_available(false);
+            }
         });
     }
     // ---- Settings: probe interval + default expiration (issue #6) ----
@@ -831,6 +861,22 @@ fn main() -> anyhow::Result<()> {
                         toggle_window(&weak);
                     }
                 }
+                // A newer GitHub release was found -> show the update banner,
+                // unless the user already chose to ignore exactly this version.
+                while let Ok(info) = update_rx.try_recv() {
+                    if info.version == app_state.borrow().settings.skipped_update {
+                        continue;
+                    }
+                    if let Some(a) = weak.upgrade() {
+                        let mut args = FluentArgs::new();
+                        args.set("version", info.version.clone());
+                        a.global::<Strings>()
+                            .set_update_banner_body(loc.t_args("update-banner-body", &args).into());
+                        a.set_update_version(info.version.into());
+                        a.set_update_url(info.url.into());
+                        a.set_update_available(true);
+                    }
+                }
                 // CLI install outcomes -> clear "Installing…" and surface a
                 // clear result instead of swallowing failures.
                 while let Ok(outcome) = install_rx.try_recv() {
@@ -960,6 +1006,21 @@ fn main() -> anyhow::Result<()> {
                                         update_tray_icon(&tray, "relogin");
                                     }
                                 }
+                                // The tunnel was deleted/expired mid-session: drop
+                                // it from the persisted auto-host set so the next
+                                // launch does not retry a host that can never
+                                // succeed (the loop that left it stuck on
+                                // "authorizing…").
+                                if devtunnel::is_missing_tunnel_error(msg) {
+                                    let mut ps = app_state.borrow_mut();
+                                    if ps.contains_auto_host(&tunnel_id) {
+                                        ps.remove_auto_host(&tunnel_id);
+                                        ps.save();
+                                        log::info!(
+                                            "host: {tunnel_id} no longer exists; removed from auto-host set"
+                                        );
+                                    }
+                                }
                             }
                             let id = map_host_state(&hs);
                             let mut st = state.borrow_mut();
@@ -1016,8 +1077,11 @@ fn main() -> anyhow::Result<()> {
                     let ids = app_state.borrow().auto_host.clone();
                     if !ids.is_empty() {
                         let mut st = state.borrow_mut();
+                        let mut pruned = false;
                         for id in &ids {
-                            let known = st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
+                            let exists = st.rows.iter().any(|r| &r.tunnel_id == id);
+                            let known =
+                                exists && st.rows.iter().any(|r| &r.tunnel_id == id && r.port > 0);
                             if known {
                                 log::info!("auto-resume: hosting {id}");
                                 tunnel_host.send(host::HostCommand::Host {
@@ -1025,9 +1089,21 @@ fn main() -> anyhow::Result<()> {
                                 });
                                 st.host.insert(id.clone(), "host".to_string());
                                 host_changed = true;
+                            } else if !exists {
+                                // The tunnel no longer exists (deleted/expired
+                                // while the app was closed): drop it so we stop
+                                // carrying a dead entry across launches.
+                                log::info!(
+                                    "auto-resume: {id} no longer exists; removing from auto-host set"
+                                );
+                                app_state.borrow_mut().remove_auto_host(id);
+                                pruned = true;
                             } else {
-                                log::info!("auto-resume: skipping unknown or portless group {id}");
+                                log::info!("auto-resume: skipping portless group {id}");
                             }
+                        }
+                        if pruned {
+                            app_state.borrow().save();
                         }
                     }
                 }
@@ -1669,6 +1745,9 @@ fn build_tray_menu(
 /// Call once after constructing `AppWindow`, before showing the UI.
 fn apply_strings(app: &AppWindow, loc: &Locale) {
     let s = app.global::<Strings>();
+    // Store (MSIX) builds hide the self-install / uninstall / auto-start controls;
+    // the package manages those. Compile-time constant so it is stripped in each build.
+    s.set_store_build(cfg!(feature = "store"));
     s.set_status_loading(loc.t("status-loading").into());
     s.set_status_refreshing(loc.t("status-refreshing").into());
     s.set_btn_refresh(loc.t("btn-refresh").into());
@@ -1747,6 +1826,13 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_banner_relogin_body(loc.t("banner-relogin-body").into());
     s.set_btn_sign_in(loc.t("btn-sign-in").into());
     s.set_banner_action_open_settings(loc.t("banner-action-open-settings").into());
+
+    // Update available banner (update-banner-body is filled from Rust with the
+    // release version when a newer release is found).
+    s.set_update_banner_title(loc.t("update-banner-title").into());
+    s.set_btn_update_download(loc.t("btn-update-download").into());
+    s.set_btn_update_ignore(loc.t("btn-update-ignore").into());
+
     s.set_install_status_running(loc.t("install-status-running").into());
     s.set_install_status_done(loc.t("install-status-done").into());
     s.set_install_status_elevation(loc.t("install-status-elevation").into());

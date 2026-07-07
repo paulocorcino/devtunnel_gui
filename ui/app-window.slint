@@ -9,6 +9,7 @@ import { GroupCard, GroupView, PortView } from "group-card.slint";
 import { Toast } from "toast.slint";
 import { EmptyState } from "empty-state.slint";
 import { PreflightBanner } from "banner.slint";
+import { UpdateBanner } from "update-banner.slint";
 import { SettingsDialog } from "settings.slint";
 export { Strings, Theme, GroupView, PortView }
 
@@ -76,6 +77,16 @@ export component AppWindow inherits Window {
     in-out property <string> log-level: "info";
     // App version string (from Cargo), shown in the About panel.
     in property <string> app-version;
+
+    // Update available: set by Rust when the background checker finds a newer
+    // GitHub release. Drives the UpdateBanner at the top of the window.
+    in property <bool> update-available;
+    in property <string> update-version;
+    in property <string> update-url;
+    // The user clicked "View release" — Rust opens `update-url` in the browser.
+    callback open-update-url();
+    // The user clicked "Ignore" — Rust persists `update-version` as skipped.
+    callback ignore-update();
 
     // Settings → Requirements checklist: per-item satisfied/not flags, refreshed
     // by Rust when the dialog opens and after install/auto-start actions.
@@ -207,6 +218,17 @@ export component AppWindow inherits Window {
             }
         }
         Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Update available banner (newer GitHub release) ----
+        if root.update-available : UpdateBanner {
+            url: root.update-url;
+            view-release => {
+                root.open-update-url();
+            }
+            ignore-update => {
+                root.ignore-update();
+            }
+        }
 
         // ---- Preflight banner (CLI missing / re-login) — issue #14 ----
         if root.app-state != "ready" : PreflightBanner {

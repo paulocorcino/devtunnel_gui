@@ -2,6 +2,12 @@
 // app.global::<Strings>().set_*(...). Default values are English fallbacks
 // so the UI renders correctly even before the locale is applied.
 export global Strings {
+    // True in Microsoft Store (MSIX) builds. Hides the self-install, uninstall,
+    // and HKCU auto-start controls, which the package manages itself (auto-start
+    // is declared via the manifest's windows.startupTask and toggled in Windows
+    // Settings > Startup apps). Set from Rust; defaults false for the portable build.
+    in property <bool> store-build: false;
+
     // Status bar
     in property <string> status-loading:    "loading…";
     in property <string> status-refreshing: "refreshing…";
@@ -75,7 +81,7 @@ export global Strings {
     in property <string> badge-hosting: "Hosting…";
 
     // Top bar (redesign)
-    in property <string> app-title: "Dev Tunnels";
+    in property <string> app-title: "TunnelDeck";
     in property <string> pill-connected: "Connected";
     in property <string> tooltip-settings: "Toggle dark mode";
 
@@ -132,7 +138,7 @@ export global Strings {
 
     // About
     in property <string> about-title: "About";
-    in property <string> about-app-name: "Dev Tunnels GUI";
+    in property <string> about-app-name: "TunnelDeck for Dev Tunnels";
     in property <string> about-version-label: "Version";
     in property <string> about-tagline: "Manage Microsoft Dev Tunnels from your Windows tray.";
     in property <string> about-built-on: "Built on Microsoft Dev Tunnels — Microsoft's free, security-focused tunneling service — and its official CLI and SDK. Not affiliated with or endorsed by Microsoft.";
@@ -150,6 +156,13 @@ export global Strings {
     in property <string> relogin-message: "Sign-in expired — sign in again to keep hosting";
     in property <string> btn-sign-in: "Sign in";
     in property <string> banner-action-open-settings: "Open Settings";
+
+    // Update available banner (update-banner-body is filled from Rust with the
+    // release version, so it has no static default).
+    in property <string> update-banner-title: "Update available";
+    in property <string> update-banner-body;
+    in property <string> btn-update-download: "View release";
+    in property <string> btn-update-ignore: "Ignore";
 
     // Install CLI progress / outcome
     in property <string> install-status-running: "Installing…";
