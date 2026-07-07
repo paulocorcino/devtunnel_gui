@@ -115,9 +115,18 @@ mod tests {
     fn port_count_uses_english_plural_rules() {
         // en-US: 0 and 2+ are "other", only 1 is "one".
         let loc = Locale::load("en-US");
-        assert_eq!(plain(loc.t_args("status-port-count", &count_args(0))), "0 ports");
-        assert_eq!(plain(loc.t_args("status-port-count", &count_args(1))), "1 port");
-        assert_eq!(plain(loc.t_args("status-port-count", &count_args(3))), "3 ports");
+        assert_eq!(
+            plain(loc.t_args("status-port-count", &count_args(0))),
+            "0 ports"
+        );
+        assert_eq!(
+            plain(loc.t_args("status-port-count", &count_args(1))),
+            "1 port"
+        );
+        assert_eq!(
+            plain(loc.t_args("status-port-count", &count_args(3))),
+            "3 ports"
+        );
     }
 
     #[test]
@@ -127,6 +136,9 @@ mod tests {
         // `[one]` branch ("1 port"). The bundle must use the resolved (en-US)
         // langid so plural rules match the loaded text.
         let loc = Locale::load("pt-BR");
-        assert_eq!(plain(loc.t_args("status-port-count", &count_args(0))), "0 ports");
+        assert_eq!(
+            plain(loc.t_args("status-port-count", &count_args(0))),
+            "0 ports"
+        );
     }
 }

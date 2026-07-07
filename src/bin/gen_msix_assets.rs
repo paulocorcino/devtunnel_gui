@@ -25,15 +25,30 @@ struct Square {
 /// tiles on high-DPI displays (same names with a `.scale-200` infix).
 const SQUARES: &[Square] = &[
     // App-list / taskbar / Start small icon.
-    Square { name: "Square44x44Logo.png", size: 44 },
+    Square {
+        name: "Square44x44Logo.png",
+        size: 44,
+    },
     // Small tile.
-    Square { name: "Square71x71Logo.png", size: 71 },
+    Square {
+        name: "Square71x71Logo.png",
+        size: 71,
+    },
     // Medium tile (required).
-    Square { name: "Square150x150Logo.png", size: 150 },
+    Square {
+        name: "Square150x150Logo.png",
+        size: 150,
+    },
     // Large tile.
-    Square { name: "Square310x310Logo.png", size: 310 },
+    Square {
+        name: "Square310x310Logo.png",
+        size: 310,
+    },
     // Store listing logo carried inside the package.
-    Square { name: "StoreLogo.png", size: 50 },
+    Square {
+        name: "StoreLogo.png",
+        size: 50,
+    },
 ];
 
 /// Wide tile (310x150): the square mark centred on a transparent canvas.

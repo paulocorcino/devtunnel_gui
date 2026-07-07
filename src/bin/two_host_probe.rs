@@ -297,13 +297,17 @@ async fn main() -> anyhow::Result<()> {
             finish(stop, poller).await;
             if rejected && !transient {
                 println!("\nVERDICT: REJECT — the relay refuses a second host on one tunnel id.");
-                println!("  → make-before-break (connect-new-then-drop-old) is impossible as framed.");
+                println!(
+                    "  → make-before-break (connect-new-then-drop-old) is impossible as framed."
+                );
                 println!("  → fall back to minimizing the break window on re-mint.");
             } else {
                 println!(
                     "\nVERDICT: INCONCLUSIVE — B failed on a transient transport error, not a"
                 );
-                println!("  service rejection. Re-run; this is the same flaky DNS that retries on A.");
+                println!(
+                    "  service rejection. Re-run; this is the same flaky DNS that retries on A."
+                );
             }
             match a_after {
                 Some(r) => println!("  note: host A also dropped during B's attempt: {r:?}"),
@@ -312,7 +316,10 @@ async fn main() -> anyhow::Result<()> {
             return Ok(());
         }
         Ok(pair) => {
-            println!("[B] connected + port forwarded ✓ ({:?})", t_b_start.elapsed());
+            println!(
+                "[B] connected + port forwarded ✓ ({:?})",
+                t_b_start.elapsed()
+            );
             pair
         }
     };
@@ -352,10 +359,14 @@ async fn main() -> anyhow::Result<()> {
             println!("  → GO, but measure the gap from the poll trace above before committing.");
         }
         Verdict::EvictNew(r, dt) => {
-            println!("VERDICT: EVICT (old evicts new) — host B dropped {dt:?} after finishing connect.");
+            println!(
+                "VERDICT: EVICT (old evicts new) — host B dropped {dt:?} after finishing connect."
+            );
             println!("  detail: B handle resolved with {r}");
             println!("  → the service keeps the incumbent; a second host cannot take over live.");
-            println!("  → NO-GO on make-before-break as framed; minimize the break window instead.");
+            println!(
+                "  → NO-GO on make-before-break as framed; minimize the break window instead."
+            );
         }
     }
     println!("──────────────────────────────────────────────");

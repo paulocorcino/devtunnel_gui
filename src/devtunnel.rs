@@ -800,8 +800,8 @@ mod tests {
     use super::{
         anonymous_ace_args, classify_anonymous_access, classify_install_result, classify_user_show,
         is_auth_error, is_fatal_connect_error, is_missing_tunnel_error, parse_leading_int,
-        parse_rate_bps, parse_size_bytes, sanitize_tunnel_id,
-        tunnel_ports, update_expiration_args, InstallOutcome, ShowResult,
+        parse_rate_bps, parse_size_bytes, sanitize_tunnel_id, tunnel_ports, update_expiration_args,
+        InstallOutcome, ShowResult,
     };
 
     #[test]
@@ -1040,7 +1040,9 @@ mod tests {
 
     #[test]
     fn fatal_on_request_validation_errors() {
-        assert!(is_fatal_connect_error("The request failed: 400 Bad Request"));
+        assert!(is_fatal_connect_error(
+            "The request failed: 400 Bad Request"
+        ));
         assert!(is_fatal_connect_error(
             "the tunnel port protocol cannot be changed"
         ));
@@ -1051,8 +1053,12 @@ mod tests {
     fn fatal_on_deleted_or_missing_tunnel() {
         // A deleted/expired tunnel surfaces while minting the host token; retrying
         // can never succeed, so it must stop instead of looping on `Authorizing`.
-        assert!(is_fatal_connect_error("Tunnel not found in brs: fancy-ocean"));
-        assert!(is_fatal_connect_error("The request was rejected: 404 Not Found"));
+        assert!(is_fatal_connect_error(
+            "Tunnel not found in brs: fancy-ocean"
+        ));
+        assert!(is_fatal_connect_error(
+            "The request was rejected: 404 Not Found"
+        ));
     }
 
     #[test]
@@ -1066,9 +1072,15 @@ mod tests {
     fn missing_tunnel_detects_deleted_or_expired() {
         // Drives the auto-host prune: only a genuinely-gone tunnel, not every
         // fatal error (a 400 protocol mismatch must keep the group).
-        assert!(is_missing_tunnel_error("Tunnel not found in brs: fancy-ocean"));
-        assert!(is_missing_tunnel_error("The request was rejected: 404 Not Found"));
+        assert!(is_missing_tunnel_error(
+            "Tunnel not found in brs: fancy-ocean"
+        ));
+        assert!(is_missing_tunnel_error(
+            "The request was rejected: 404 Not Found"
+        ));
         assert!(!is_missing_tunnel_error("400 Bad Request"));
-        assert!(!is_missing_tunnel_error("the tunnel port protocol cannot be changed"));
+        assert!(!is_missing_tunnel_error(
+            "the tunnel port protocol cannot be changed"
+        ));
     }
 }
