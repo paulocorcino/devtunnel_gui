@@ -25,7 +25,7 @@
   <Identity
     Name="__IDENTITY_NAME__"
     Publisher="__PUBLISHER_ID__"
-    Version="0.1.0.0"
+    Version="__VERSION__"
     ProcessorArchitecture="x64" />
 
   <Properties>

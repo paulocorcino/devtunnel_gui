@@ -160,9 +160,9 @@ $manifest = Get-Content (Join-Path $scriptDir "AppxManifest.xml") -Raw
 $manifest = $manifest.Replace("__IDENTITY_NAME__", $IdentityName)
 $manifest = $manifest.Replace("__PUBLISHER_ID__", $PublisherId)
 $manifest = $manifest.Replace("__PUBLISHER_DISPLAY_NAME__", $PublisherDisplayName)
-# Case-sensitive so it targets Identity's Version="..." and NOT the lowercase
-# version="1.0" in the <?xml ... ?> declaration.
-$manifest = $manifest -creplace 'Version="[\d.]+"', "Version=`"$Version`""
+# Token replace (not regex) so we only touch Identity's Version and never the
+# <?xml version=...?> declaration or TargetDeviceFamily Min/MaxVersion.
+$manifest = $manifest.Replace("__VERSION__", $Version)
 Set-Content -Path (Join-Path $layout "AppxManifest.xml") -Value $manifest -Encoding UTF8
 
 # --- 4. Pack -----------------------------------------------------------------
