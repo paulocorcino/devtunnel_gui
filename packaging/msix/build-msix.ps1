@@ -90,6 +90,12 @@ if (-not $CertPath)             { $CertPath             = $envMap["CERT_PATH"] }
 if (-not $CertPassword)         { $CertPassword         = $envMap["CERT_PASSWORD"] }
 if (-not $Version)              { $Version              = "0.1.0.0" }
 
+# A relative CERT_PATH is resolved against the repo root, so the .env value works
+# no matter which directory you run the script from.
+if ($CertPath -and -not [System.IO.Path]::IsPathRooted($CertPath)) {
+    $CertPath = Join-Path $repoRoot $CertPath
+}
+
 $missing = @()
 if (-not $IdentityName)         { $missing += "IdentityName / IDENTITY_NAME" }
 if (-not $PublisherId)          { $missing += "PublisherId / PUBLISHER_ID" }
