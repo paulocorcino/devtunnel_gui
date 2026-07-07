@@ -47,27 +47,61 @@ if (-not $Exe) { $Exe = Join-Path $repoRoot "target\release\devtunnel_gui.exe" }
 $outDir = Join-Path $repoRoot "docs\store\screenshots"
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-# --- Win32 interop: GetWindowRect + SetForegroundWindow -----------------------
-if (-not ("Win32Native" -as [type])) {
+# --- Win32 interop -----------------------------------------------------------
+# The Slint UI window is a separate top-level window (class 'Window Class'); the
+# process's MainWindowHandle points at a tiny 16x16 winit helper window, so we
+# enumerate all top-level windows for the PID and pick the largest visible one.
+if (-not ("WinCap" -as [type])) {
     Add-Type @"
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 public struct RECT { public int Left, Top, Right, Bottom; }
-public static class Win32Native {
-    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
-    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
-    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr hWnd, int n);
+public static class WinCap {
+    public delegate bool EnumProc(IntPtr h, IntPtr l);
+    [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc cb, IntPtr l);
+    [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+    [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+    [DllImport("dwmapi.dll")] public static extern int DwmGetWindowAttribute(IntPtr h, int attr, out RECT r, int size);
+    [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+    // True visible bounds, excluding the invisible DWM resize border / drop shadow
+    // that GetWindowRect includes on Windows 10/11 (DWMWA_EXTENDED_FRAME_BOUNDS=9).
+    public static RECT VisibleRect(IntPtr h) {
+        RECT r;
+        if (DwmGetWindowAttribute(h, 9, out r, Marshal.SizeOf(typeof(RECT))) == 0) return r;
+        GetWindowRect(h, out r); return r;
+    }
+    [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int n);
+    [DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
     [DllImport("shcore.dll")] public static extern int SetProcessDpiAwareness(int v);
+    public static List<IntPtr> ForPid(uint target) {
+        var res = new List<IntPtr>();
+        EnumWindows((h,l)=>{ uint p; GetWindowThreadProcessId(h, out p); if(p==target) res.Add(h); return true; }, IntPtr.Zero);
+        return res;
+    }
 }
 "@
     # Capture in physical pixels so the window isn't scaled/blurred on high DPI.
-    try { [Win32Native]::SetProcessDpiAwareness(2) | Out-Null } catch {}
+    try { [WinCap]::SetProcessDpiAwareness(2) | Out-Null } catch {}
 }
 
 # --- Find (or launch) the app window -----------------------------------------
-function Get-AppProcess {
-    Get-Process -Name "devtunnel_gui" -ErrorAction SilentlyContinue |
-        Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+function Find-AppWindow {
+    $proc = Get-Process -Name "devtunnel_gui" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $proc) { return $null }
+    $best = [IntPtr]::Zero; $bestArea = 0; $bestRect = $null
+    foreach ($h in [WinCap]::ForPid([uint32]$proc.Id)) {
+        if (-not [WinCap]::IsWindowVisible($h)) { continue }
+        $r = [WinCap]::VisibleRect($h)
+        $w = $r.Right - $r.Left; $ht = $r.Bottom - $r.Top
+        $area = $w * $ht
+        if ($w -ge 300 -and $ht -ge 300 -and $area -gt $bestArea) {
+            $best = $h; $bestArea = $area; $bestRect = $r
+        }
+    }
+    if ($best -eq [IntPtr]::Zero) { return $null }
+    return @{ Hwnd = $best; Rect = $bestRect }
 }
 
 if ($Launch) {
@@ -75,36 +109,38 @@ if ($Launch) {
     Start-Process $Exe | Out-Null
 }
 
-$proc = $null
-for ($i = 0; $i -lt 30 -and -not $proc; $i++) {
-    $proc = Get-AppProcess
-    if (-not $proc) { Start-Sleep -Milliseconds 500 }
+$win = $null
+for ($i = 0; $i -lt 30 -and -not $win; $i++) {
+    $win = Find-AppWindow
+    if (-not $win) { Start-Sleep -Milliseconds 500 }
 }
-if (-not $proc) {
-    throw "No visible TunnelDeck window found. Start the app (or pass -Launch) and make sure it isn't minimized to the tray."
+if (-not $win) {
+    throw "No visible TunnelDeck window (>=300x300) found. Open the window from the tray icon, then re-run this script."
 }
 
-$hwnd = $proc.MainWindowHandle
-[Win32Native]::SetForegroundWindow($hwnd) | Out-Null
-Start-Sleep -Milliseconds 400
+$hwnd = $win.Hwnd
+# Raise the window above everything else so the screen grab isn't of whatever is
+# covering it. SetForegroundWindow alone is unreliable from a background process
+# (foreground lock), so pin it TOPMOST, capture, then release.
+$HWND_TOPMOST = [IntPtr](-1); $HWND_NOTOPMOST = [IntPtr](-2)
+$SWP = 0x0001 -bor 0x0002 -bor 0x0040  # NOSIZE | NOMOVE | SHOWWINDOW
+[WinCap]::ShowWindow($hwnd, 9) | Out-Null   # SW_RESTORE
+[WinCap]::SetWindowPos($hwnd, $HWND_TOPMOST, 0, 0, 0, 0, $SWP) | Out-Null
+[WinCap]::SetForegroundWindow($hwnd) | Out-Null
+Start-Sleep -Milliseconds 700
 
-$rect = New-Object RECT
-[Win32Native]::GetWindowRect($hwnd, [ref]$rect) | Out-Null
+$rect = [WinCap]::VisibleRect($hwnd)
 $w = $rect.Right - $rect.Left
 $h = $rect.Bottom - $rect.Top
-# TunnelDeck starts minimized to the tray, so its only window may be a tiny
-# hidden one. Refuse anything too small to be the real UI and tell the user to
-# open the window first (click the tray icon).
-if ($w -lt 300 -or $h -lt 300) {
-    throw "Only a ${w}x${h} window was found - TunnelDeck is minimized to the tray. " +
-          "Click the tray icon to open the main window (sign in for real content), then re-run this script."
-}
 
 # --- Capture the window ------------------------------------------------------
 $shot = New-Object System.Drawing.Bitmap $w, $h
 $g = [System.Drawing.Graphics]::FromImage($shot)
 $g.CopyFromScreen($rect.Left, $rect.Top, 0, 0, (New-Object System.Drawing.Size $w, $h))
 $g.Dispose()
+
+# Release the topmost pin now that the grab is done.
+[WinCap]::SetWindowPos($hwnd, $HWND_NOTOPMOST, 0, 0, 0, 0, $SWP) | Out-Null
 
 $rawPath = Join-Path $outDir "$Name-window.png"
 $shot.Save($rawPath, [System.Drawing.Imaging.ImageFormat]::Png)
