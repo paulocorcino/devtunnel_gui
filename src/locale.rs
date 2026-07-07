@@ -87,6 +87,10 @@ fn resolve_lang(_lang: &str) -> &'static str {
     "en-US"
 }
 
+// Kept as a `match` on purpose: adding a locale is a one-line arm here (see the
+// i18n section of CLAUDE.md), so we tolerate the single-binding form until a
+// second locale ships.
+#[allow(clippy::match_single_binding)]
 fn ftl_source(lang: &str) -> &'static str {
     // `lang` is already a resolved tag from [`resolve_lang`].
     match lang {
