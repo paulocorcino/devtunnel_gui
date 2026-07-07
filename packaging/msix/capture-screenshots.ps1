@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   Grabs the TunnelDeck window and composes it, centred, on a 16:9 canvas with a
-  soft indigo backdrop — the format the Store expects (min 1366x768; this defaults
+  soft indigo backdrop - the format the Store expects (min 1366x768; this defaults
   to 1920x1080). Saves both the raw window PNG and the composed canvas PNG to
   docs/store/screenshots/.
 
@@ -96,7 +96,7 @@ $h = $rect.Bottom - $rect.Top
 # hidden one. Refuse anything too small to be the real UI and tell the user to
 # open the window first (click the tray icon).
 if ($w -lt 300 -or $h -lt 300) {
-    throw "Only a ${w}x${h} window was found — TunnelDeck is minimized to the tray. " +
+    throw "Only a ${w}x${h} window was found - TunnelDeck is minimized to the tray. " +
           "Click the tray icon to open the main window (sign in for real content), then re-run this script."
 }
 

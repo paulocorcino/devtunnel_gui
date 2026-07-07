@@ -4,7 +4,7 @@
 
 .DESCRIPTION
   1. Compiles the release executable with the `store` cargo feature (self-install,
-     update-checker and HKCU auto-start compiled out — the package owns those).
+     update-checker and HKCU auto-start compiled out - the package owns those).
   2. Renders the visual assets from the procedural app icon (gen_msix_assets).
   3. Assembles a package layout, substituting the Partner Center identity values
      into AppxManifest.xml.
@@ -12,7 +12,7 @@
   5. Optionally signs it with a local test certificate for sideload testing, and/or
      runs the Windows App Certification Kit (WACK).
 
-  The .msix you upload to Partner Center must be UNSIGNED (the Store re-signs it) —
+  The .msix you upload to Partner Center must be UNSIGNED (the Store re-signs it) -
   so only pass -Sign when you want to install/test locally, and produce a separate
   unsigned package for submission.
 
@@ -128,7 +128,7 @@ $makeappx = Find-SdkTool "makeappx.exe"
 Write-Host "makeappx: $makeappx"
 
 # --- 1. Build the store executable -------------------------------------------
-# The `store` feature pulls in `hosting` (Host button) — needs NASM + Strawberry
+# The `store` feature pulls in `hosting` (Host button) - needs NASM + Strawberry
 # Perl on PATH for the vendored-OpenSSL build (see docs/store/README.md).
 Write-Host "`n[1/4] Building release executable (--features store)..."
 Push-Location $repoRoot
@@ -176,7 +176,7 @@ Write-Host "Package built: $msixPath"
 if ($Sign) {
     if (-not $CertPath) { throw "-Sign requires -CertPath <pfx>." }
     $signtool = Find-SdkTool "signtool.exe"
-    Write-Host "`nSigning (local test only — do NOT submit a signed package)..."
+    Write-Host "`nSigning (local test only - do NOT submit a signed package)..."
     $args = @("sign", "/fd", "SHA256", "/a", "/f", $CertPath)
     if ($CertPassword) { $args += @("/p", $CertPassword) }
     $args += $msixPath
