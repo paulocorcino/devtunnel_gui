@@ -75,13 +75,17 @@ $cert = New-SelfSignedCertificate -Type Custom -Subject "CN=Paulo Corcino" `
 Export-PfxCertificate -Cert $cert -FilePath .\TunnelDeck-test.pfx `
   -Password (ConvertTo-SecureString -String "test" -Force -AsPlainText)
 
-# Build a signed test package and run the certification kit:
-.\build-msix.ps1 -IdentityName "<...>" -PublisherId "CN=Paulo Corcino" `
-  -PublisherDisplayName "Paulo Corcino" `
-  -Sign -CertPath .\TunnelDeck-test.pfx -CertPassword test -Wack
+# Build a signed test package (identity comes from .env):
+.\build-msix.ps1 -Sign
 
-# Install it:
+# Install it (self-signed → first trust the cert; needs an ELEVATED prompt):
+Import-PfxCertificate -FilePath .\TunnelDeck-test.pfx `
+  -CertStoreLocation Cert:\LocalMachine\TrustedPeople `
+  -Password (ConvertTo-SecureString "test" -Force -AsPlainText)
 Add-AppxPackage .\out\TunnelDeck-0.1.0.0.msix
+
+# Run the certification kit — WACK requires an ELEVATED (Administrator) prompt:
+.\build-msix.ps1 -Sign -Wack
 ```
 
 Fix any **WACK** failures before submitting. Then rebuild **without** `-Sign` to

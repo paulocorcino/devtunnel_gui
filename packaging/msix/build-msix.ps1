@@ -187,7 +187,18 @@ if ($Sign) {
 
 # --- Optional: Windows App Certification Kit ---------------------------------
 if ($Wack) {
-    $appcert = Find-SdkTool "appcert.exe"
+    # appcert.exe lives in the "App Certification Kit" folder, not bin\.
+    $appcert = $null
+    foreach ($base in @("${env:ProgramFiles(x86)}\Windows Kits\10", "${env:ProgramFiles}\Windows Kits\10")) {
+        $c = Join-Path $base "App Certification Kit\appcert.exe"
+        if (Test-Path $c) { $appcert = $c; break }
+    }
+    if (-not $appcert) { throw "appcert.exe not found. Install the Windows App Certification Kit (part of the Windows SDK)." }
+
+    # WACK requires elevation.
+    $elevated = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if (-not $elevated) { throw "WACK (-Wack) requires an elevated (Administrator) PowerShell. Re-run this script from an admin prompt." }
+
     $report = Join-Path $outDir "wack-report.xml"
     Write-Host "`nRunning Windows App Certification Kit (may take several minutes)..."
     & $appcert reset
