@@ -96,7 +96,6 @@ export component AppWindow inherits Window {
     // Empty when logged out or not yet fetched.
     in property <string> req-login-account;
     in property <bool> req-installed-ok;
-    in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
     // The user clicked "Install CLI" in the requirements checklist.
     callback install-cli();
@@ -378,7 +377,6 @@ export component AppWindow inherits Window {
         req-login-ok: root.req-login-ok;
         req-login-account: root.req-login-account;
         req-installed-ok: root.req-installed-ok;
-        req-shortcut-ok: root.req-shortcut-ok;
         req-autostart-ok: root.req-autostart-ok;
         installing: root.installing;
         install-cli => {

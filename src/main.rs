@@ -1243,54 +1243,22 @@ fn refresh_requirements(app: &AppWindow) {
     app.set_req_cli_ok(app_state != "cli-missing");
     app.set_req_login_ok(app_state == "ready");
     app.set_req_installed_ok(install::is_installed());
-    app.set_req_shortcut_ok(install::shortcut_exists());
     app.set_req_autostart_ok(autostart::is_enabled());
 }
 
-/// Enables "Start with Windows", performing the full per-user install when the
-/// app is running as a portable executable: relocate into `%LOCALAPPDATA%\
-/// Programs`, create the Start-menu shortcut, register auto-start at the new
-/// path, then relaunch from there and exit (the fresh instance deletes the
-/// portable original). When already installed, just (re)writes the Run entry and
-/// ensures the shortcut exists.
+/// Enables "Start with Windows" by registering the auto-start Run entry at the
+/// executable's *current* location. It does not relocate the binary or relaunch:
+/// wherever the app runs from today is the path Windows will start at logon.
 #[cfg(windows)]
-fn enable_auto_start(app_state: &Rc<RefCell<state::AppState>>) {
-    if install::is_installed() {
-        if let Ok(exe) = std::env::current_exe() {
+fn enable_auto_start(_app_state: &Rc<RefCell<state::AppState>>) {
+    match std::env::current_exe() {
+        Ok(exe) => {
             if let Err(e) = autostart::enable_at(&exe) {
                 log::warn!("autostart: failed to set Run entry: {e}");
             }
-            if let Err(e) = install::create_start_menu_shortcut(&exe) {
-                log::warn!("install: failed to create shortcut: {e}");
-            }
         }
-        return;
+        Err(e) => log::warn!("autostart: failed to resolve current executable: {e}"),
     }
-
-    // Portable: move into the programs folder and hand off to the new copy.
-    let new_exe = match install::install_self() {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("install: relocation failed: {e}");
-            return;
-        }
-    };
-    if let Err(e) = install::create_start_menu_shortcut(&new_exe) {
-        log::warn!("install: failed to create shortcut: {e}");
-    }
-    if let Err(e) = autostart::enable_at(&new_exe) {
-        log::warn!("autostart: failed to set Run entry: {e}");
-    }
-    // Persist the enabled state before relaunching so the fresh instance reflects it.
-    {
-        let mut st = app_state.borrow_mut();
-        st.settings.auto_start = true;
-        st.save();
-    }
-    if install::relaunch_installed(&new_exe).is_ok() {
-        std::process::exit(0);
-    }
-    log::warn!("install: relaunch from new location failed; staying in place");
 }
 
 /// Uninstalls the app: removes the Start-menu shortcut, disables start-with-
@@ -1856,11 +1824,8 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_req_cli(loc.t("req-cli").into());
     s.set_req_login(loc.t("req-login").into());
     s.set_req_login_as(loc.t("req-login-as").into());
-    s.set_req_installed(loc.t("req-installed").into());
-    s.set_req_shortcut(loc.t("req-shortcut").into());
     s.set_req_autostart(loc.t("req-autostart").into());
     s.set_btn_install_cli(loc.t("btn-install-cli").into());
-    s.set_req_install_hint(loc.t("req-install-hint").into());
 
     // Settings
     s.set_settings_title(loc.t("settings-title").into());

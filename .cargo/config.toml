@@ -1,0 +1,6 @@
+# Statically link the MSVC C runtime into the binary so it does not depend on
+# the Microsoft Visual C++ Redistributable (VCRUNTIME140.dll / MSVCP140.dll).
+# Required for MS Store publishing: policy 10.2.4.1 forbids undisclosed
+# non-integrated software dependencies.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

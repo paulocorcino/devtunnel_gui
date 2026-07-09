@@ -92,11 +92,8 @@ req-title = Requirements
 req-cli = Dev Tunnels CLI installed
 req-login = Signed in
 req-login-as = Signed in as
-req-installed = Installed in your programs folder
-req-shortcut = Start-menu shortcut created
 req-autostart = Starts with Windows
 btn-install-cli = Install CLI
-req-install-hint = Turning on "Start with Windows" installs the app into your user programs folder, adds a Start-menu shortcut, and enables auto-start.
 
 ## Settings
 settings-title = Settings
