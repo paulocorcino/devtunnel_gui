@@ -1,23 +1,19 @@
 # PRD Index
 
-Each PRD captures the problem, requirements, Definition of Done, and issue breakdown
-for one roadmap track.
+Each PRD captures the problem, requirements, Definition of Done, and issue breakdown for one roadmap track.
 
 - **Roadmap** → points to PRDs (thin portfolio)
-- **PRD** → 1 GitHub Milestone + N issues
-- **Issue** → belongs to the milestone, body contains `Part of PRD-NNNN`
-- **Milestone 100% closed = PRD DoD verified = PRD `done` = roadmap track `done`**
+- **PRD** → 1 issue grouping + N issues
+- **Issue** → belongs to the grouping, body contains `Part of PRD-NNNN`
+- **Grouping 100% closed = PRD DoD verified = PRD `done` = roadmap track `done`**
 
-See [docs/agents/issue-tracker.md](../agents/issue-tracker.md) for the exact `gh` commands.
+The "grouping" is whatever your issue tracker uses: a GitHub/GitLab **Milestone**, or the `.scratch/<feature-slug>/` directory for the local-markdown tracker. See [docs/agents/issue-tracker.md](../agents/issue-tracker.md) for the exact commands.
 
 ## Index
 
-| PRD | Title | Track | Status | Milestone |
-|-----|-------|-------|--------|-----------|
-| [0003](0003-t0-onboarding-first-run.md) | First-run onboarding | `t0` | `done` | PRD-0003 |
-| [0004](0004-t1-hosting-robustness.md) | Hosting robustness (spike) | `t1` | `active` | PRD-0004 |
-| [0005](0005-t2-metrics-chart.md) | Metrics line chart | `t2` | `active` | PRD-0005 |
-| [0006](0006-t3-view-fold.md) | Pure view-fold module | `t3` | `active` | PRD-0006 |
+| PRD | Title | Track | Status | Issues |
+|-----|-------|-------|--------|--------|
+| — | _pending_ | — | `draft` | — |
 
 ## Naming convention
 
@@ -25,18 +21,18 @@ See [docs/agents/issue-tracker.md](../agents/issue-tracker.md) for the exact `gh
 NNNN-<trackid>-<slug>.md
 ```
 
-- `NNNN` — sequential, zero-padded (shares the space with ADRs: `0001`/`0002` are ADRs, PRDs start at `0003`)
+- `NNNN` — sequential, zero-padded (share the space with ADRs if you keep them)
 - `<trackid>` — short track identifier (`t0`, `t1`, …)
 - `<slug>` — lowercase kebab-case description
 
 ## Workflow
 
 1. `/to-prd` generates the PRD file from conversation context using `_template.md`.
-2. Create the GitHub Milestone for the PRD:
-   `gh api repos/paulocorcino/devtunnel_gui/milestones --method POST -f title="PRD-NNNN: Title"`
-3. `/to-issues` reads the "Issue breakdown" section and creates the issues with
-   `Part of PRD-NNNN` in the body, each attached to the milestone.
+2. Create the issue grouping for the PRD:
+   - **GitHub:** a Milestone — `gh api repos/{owner}/{repo}/milestones --method POST -f title="PRD-NNNN: Title"`
+   - **GitLab:** a Milestone — `glab api projects/:id/milestones --method POST -f title="PRD-NNNN: Title"`
+   - **Local markdown:** none — the `.scratch/<feature-slug>/` directory *is* the grouping.
+3. `/to-issues` reads the "Issue breakdown" section and creates the issues with `Part of PRD-NNNN` in the body, each attached to the grouping.
 4. Fill in issue numbers in the PRD's issue breakdown table.
 5. Execute issues (e.g. `/tdd`, then review).
-6. When the milestone reaches 100% and DoD is met: close it, set PRD `status: done`,
-   and update this file and `docs/roadmap.md`.
+6. When the grouping reaches 100% and DoD is met: close it, set PRD `status: done`, and update this file and `docs/roadmap.md`.

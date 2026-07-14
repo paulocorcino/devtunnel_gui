@@ -4,34 +4,43 @@ How the engineering skills should consume this repo's domain documentation when 
 
 ## Before exploring, read these
 
-- **`CONTEXT.md`** at the repo root — the domain glossary and resolved decisions for DevTunnel GUI.
-- **`docs/adr/`** — read ADRs that touch the area you're about to work in (e.g. `0001-split-cli-management-sdk-hosting-rust.md`).
+- **`CONTEXT.md`** at the repo root, or
+- **`CONTEXT-MAP.md`** at the repo root if it exists — it points at one `CONTEXT.md` per context. Read each one relevant to the topic.
+- **`docs/adr/`** — read ADRs that touch the area you're about to work in. In multi-context repos, also check `src/<context>/docs/adr/` for context-scoped decisions.
 
 If any of these files don't exist, **proceed silently**. Don't flag their absence; don't suggest creating them upfront. The producer skill (`/grill-with-docs`) creates them lazily when terms or decisions actually get resolved.
 
 ## File structure
 
-Single-context repo:
+Single-context repo (most repos):
 
 ```
 /
 ├── CONTEXT.md
-├── docs/
-│   ├── adr/           ← architectural decisions (shares numbering with PRDs)
-│   │   ├── 0001-split-cli-management-sdk-hosting-rust.md
-│   │   └── 0002-per-group-host-thread-isolation.md
-│   ├── agents/        ← this setup (issue-tracker, triage-labels, domain)
-│   ├── prd/           ← PRDs (one per roadmap track); issues live on GitHub
-│   └── roadmap.md     ← thin portfolio of tracks
+├── docs/adr/
+│   ├── 0001-event-sourced-orders.md
+│   └── 0002-postgres-for-write-model.md
 └── src/
 ```
 
-Issues are tracked on **GitHub** (see `issue-tracker.md`), not in-repo. PRDs and the
-roadmap are versioned here; each PRD maps to a GitHub Milestone.
+Multi-context repo (presence of `CONTEXT-MAP.md` at the root):
+
+```
+/
+├── CONTEXT-MAP.md
+├── docs/adr/                          ← system-wide decisions
+└── src/
+    ├── ordering/
+    │   ├── CONTEXT.md
+    │   └── docs/adr/                  ← context-specific decisions
+    └── billing/
+        ├── CONTEXT.md
+        └── docs/adr/
+```
 
 ## Use the glossary's vocabulary
 
-When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md` — e.g. **Group** (= one Dev Tunnel), **Port**, **Host**, **Health probe (3 states)**, **Real Tunnel ID** vs **Requested Tunnel ID**. Don't drift to synonyms the glossary explicitly avoids (e.g. PowerShell scripting was eliminated — see the decisions section).
+When your output names a domain concept (in an issue title, a refactor proposal, a hypothesis, a test name), use the term as defined in `CONTEXT.md`. Don't drift to synonyms the glossary explicitly avoids.
 
 If the concept you need isn't in the glossary yet, that's a signal — either you're inventing language the project doesn't use (reconsider) or there's a real gap (note it for `/grill-with-docs`).
 
@@ -39,4 +48,4 @@ If the concept you need isn't in the glossary yet, that's a signal — either yo
 
 If your output contradicts an existing ADR, surface it explicitly rather than silently overriding:
 
-> _Contradicts ADR-0001 (split CLI management / SDK hosting) — but worth reopening because…_
+> _Contradicts ADR-0007 (event-sourced orders) — but worth reopening because…_
