@@ -216,9 +216,9 @@ export component SettingsDialog inherits Rectangle {
                 // -- General --
                 if root.section == 0 : VerticalLayout {
                     spacing: Theme.gap;
-                    // Auto-start is managed by the MSIX package (windows.startupTask,
-                    // toggled in Windows Settings) in Store builds, so hide this toggle there.
-                    if !Strings.store-build: Check {
+                    // Registers an HKCU Run entry pointing at the current
+                    // executable — no relocation. Shown in all builds.
+                    Check {
                         text: Strings.field-auto-start;
                         checked <=> root.auto-start;
                         toggled(on) => {
@@ -293,10 +293,9 @@ export component SettingsDialog inherits Rectangle {
                             }
                         }
                     }
-                    // Auto-start state and the uninstall action only apply to the
-                    // portable build. In Store builds the MSIX package owns install
-                    // and removal, so hide this whole block.
-                    if !Strings.store-build: ReqRow {
+                    // Auto-start status applies to all builds now (an HKCU Run
+                    // entry, no relocation).
+                    ReqRow {
                         ok: root.req-autostart-ok;
                         label: Strings.req-autostart;
                     }

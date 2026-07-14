@@ -45,7 +45,7 @@
   </Resources>
 
   <Applications>
-    <Application Id="TunnelDeck" Executable="devtunnel_gui.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="TunnelDeck" Executable="tunneldeck.exe" EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="TunnelDeck for Dev Tunnels"
         Description="Manage Microsoft Dev Tunnels from your Windows tray — one tap to a public HTTPS URL."
@@ -64,7 +64,7 @@
              the package never silently auto-launches after install. -->
         <uap5:Extension
           Category="windows.startupTask"
-          Executable="devtunnel_gui.exe"
+          Executable="tunneldeck.exe"
           EntryPoint="Windows.FullTrustApplication">
           <uap5:StartupTask
             TaskId="TunnelDeckStartup"

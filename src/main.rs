@@ -200,7 +200,7 @@ fn main() -> anyhow::Result<()> {
     let tray = Rc::new(
         TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("DevTunnel GUI")
+            .with_tooltip(loc.t("app-title"))
             .with_icon(build_icon())
             .build()?,
     );
@@ -287,10 +287,9 @@ fn main() -> anyhow::Result<()> {
             #[cfg(windows)]
             {
                 if enabled {
+                    // Registers the Run entry at the executable's current
+                    // location; it does not relocate the binary or relaunch.
                     enable_auto_start(&app_state);
-                    // `enable_auto_start` exits the process when it relocates a
-                    // portable install, so reaching here means we either were
-                    // already installed or the relocation could not hand off.
                 } else if let Err(e) = autostart::disable() {
                     log::warn!("autostart: failed to disable: {e}");
                 }

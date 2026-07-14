@@ -19,7 +19,7 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// Sub-folder name under `%LOCALAPPDATA%\Programs` and the Start-menu link label.
 const APP_DIR_NAME: &str = "DevTunnelGUI";
 /// Friendly name shown for the Start-menu shortcut (and its `.lnk` file stem).
-const SHORTCUT_NAME: &str = "DevTunnel GUI";
+const SHORTCUT_NAME: &str = "TunnelDeck";
 
 /// `%LOCALAPPDATA%\Programs\DevTunnelGUI` — the no-admin per-user install dir.
 pub fn programs_dir() -> Option<PathBuf> {

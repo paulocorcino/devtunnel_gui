@@ -1,4 +1,4 @@
-# DevTunnel GUI — English (en-US)
+# TunnelDeck — English (en-US)
 
 ## Status bar
 status-loading = loading…
@@ -112,7 +112,7 @@ btn-close = Close
 
 ## Settings — uninstall
 btn-uninstall = Uninstall
-confirm-uninstall = Uninstall DevTunnel GUI? This removes the Start-menu shortcut, turns off start-with-Windows, deletes your saved settings, and removes the app from your programs folder.
+confirm-uninstall = Uninstall TunnelDeck? This removes the Start-menu shortcut, turns off start-with-Windows, deletes your saved settings, and removes the app from your programs folder.
 
 ## About
 about-title = About
@@ -148,7 +148,7 @@ install-status-failed = Install failed: { $message }
 install-status-elevation = Install needs administrator rights — opening the manual install page
 install-status-winget-missing = winget not available — opening the manual install page
 status-signing-in = signing in…
-toast-relogin-title = DevTunnel GUI — sign-in required
+toast-relogin-title = TunnelDeck — sign-in required
 toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
 
 ## Port detail panel
