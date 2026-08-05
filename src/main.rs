@@ -31,7 +31,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
-    Icon, TrayIconBuilder, TrayIconEvent,
+    Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 
 /// A data-load result pumped from a background thread to the UI thread:
@@ -200,6 +200,12 @@ fn main() -> anyhow::Result<()> {
     let tray = Rc::new(
         TrayIconBuilder::new()
             .with_menu(Box::new(menu))
+            // Left-click is reserved for toggling the window. If the menu also
+            // opened on left-click (the crate default), that same click would
+            // queue a `Click` event that the toggle handler processes right
+            // after the menu's "Open window" — showing the window and then
+            // immediately hiding it. The context menu opens on right-click only.
+            .with_menu_on_left_click(false)
             .with_tooltip(loc.t("app-title"))
             .with_icon(build_icon())
             .build()?,
@@ -209,6 +215,7 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = app.as_weak();
         app.window().on_close_requested(move || {
+            log::debug!("window: close requested -> hide to tray");
             if let Some(a) = weak.upgrade() {
                 let _ = a.hide();
             }
@@ -845,7 +852,10 @@ fn main() -> anyhow::Result<()> {
                 // Tray menu clicks.
                 while let Ok(ev) = menu_rx.try_recv() {
                     match actions.borrow().get(&ev.id) {
-                        Some(Action::Show) => show_window(&weak),
+                        Some(Action::Show) => {
+                            log::debug!("tray: menu 'Open window' clicked");
+                            show_window(&weak);
+                        }
                         Some(Action::Quit) => {
                             let _ = slint::quit_event_loop();
                         }
@@ -854,10 +864,23 @@ fn main() -> anyhow::Result<()> {
                         None => {}
                     }
                 }
-                // Tray icon click: toggle the window.
+                // Tray icon click: toggle the window. A single physical click
+                // emits both a `Down` and an `Up` event — toggling on each would
+                // show and immediately hide the window, so only `Up` counts.
+                // Right-click belongs to the context menu, never to the toggle.
                 while let Ok(ev) = tray_rx.try_recv() {
-                    if let TrayIconEvent::Click { .. } = ev {
-                        toggle_window(&weak);
+                    if let TrayIconEvent::Click {
+                        button,
+                        button_state,
+                        ..
+                    } = ev
+                    {
+                        log::debug!("tray: click button={button:?} state={button_state:?}");
+                        if button == MouseButton::Left
+                            && button_state == MouseButtonState::Up
+                        {
+                            toggle_window(&weak);
+                        }
                     }
                 }
                 // A newer GitHub release was found -> show the update banner,
@@ -1342,19 +1365,47 @@ fn expiration_string(days: i32) -> String {
 
 fn show_window(weak: &slint::Weak<AppWindow>) {
     if let Some(a) = weak.upgrade() {
+        log::debug!("window: show (was_visible={})", a.window().is_visible());
         let _ = a.show();
         a.window().set_minimized(false);
+        bring_to_front(a.window());
     }
 }
 
 fn toggle_window(weak: &slint::Weak<AppWindow>) {
     if let Some(a) = weak.upgrade() {
         if a.window().is_visible() {
+            log::debug!("window: toggle -> hide");
             let _ = a.hide();
         } else {
+            log::debug!("window: toggle -> show");
             let _ = a.show();
             a.window().set_minimized(false);
+            bring_to_front(a.window());
         }
+    }
+}
+
+/// Raises the window above the tray's own foreground window and activates it.
+///
+/// `tray-icon` calls `SetForegroundWindow` on its hidden `WS_EX_NOACTIVATE`
+/// helper window before popping up the context menu, so after "Open window" the
+/// foreground belongs to that invisible window: `show()` maps our window but it
+/// stays behind whatever the user was looking at, which reads as "nothing
+/// happened". Left-clicking the tray icon never pops the menu, which is why that
+/// path appeared to work. `focus_window()` performs the Win32 activation dance
+/// (winit attaches to the foreground thread's input queue), and since our process
+/// already owns the foreground the request is granted.
+fn bring_to_front(window: &slint::Window) {
+    use slint::winit_030::WinitWindowAccessor;
+    let raised = window
+        .with_winit_window(|w| {
+            w.set_minimized(false);
+            w.focus_window();
+        })
+        .is_some();
+    if !raised {
+        log::debug!("window: bring_to_front skipped (no winit window yet)");
     }
 }
 
