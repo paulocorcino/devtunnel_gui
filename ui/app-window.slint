@@ -10,6 +10,7 @@ import { Toast } from "toast.slint";
 import { EmptyState } from "empty-state.slint";
 import { PreflightBanner } from "banner.slint";
 import { UpdateBanner } from "update-banner.slint";
+import { CrashBanner } from "crash-banner.slint";
 import { SettingsDialog } from "settings.slint";
 export { Strings, Theme, GroupView, PortView }
 
@@ -87,6 +88,14 @@ export component AppWindow inherits Window {
     callback open-update-url();
     // The user clicked "Ignore" — Rust persists `update-version` as skipped.
     callback ignore-update();
+
+    // Crash report pending: set by Rust at startup when the previous session
+    // left a panic report on disk. Drives the CrashBanner.
+    in-out property <bool> crash-report-available;
+    // The user clicked "Report on GitHub" — Rust opens the pre-filled issue form.
+    callback report-crash();
+    // The user clicked "Dismiss" — Rust hides the banner for this session.
+    callback dismiss-crash();
 
     // Settings → Requirements checklist: per-item satisfied/not flags, refreshed
     // by Rust when the dialog opens and after install/auto-start actions.
@@ -217,6 +226,17 @@ export component AppWindow inherits Window {
             }
         }
         Rectangle { height: 1px; background: Theme.border; }
+
+        // ---- Crash report banner (previous session panicked) ----
+        // Above the update banner: a crash is the more urgent of the two.
+        if root.crash-report-available : CrashBanner {
+            report-crash => {
+                root.report-crash();
+            }
+            dismiss-crash => {
+                root.dismiss-crash();
+            }
+        }
 
         // ---- Update available banner (newer GitHub release) ----
         if root.update-available : UpdateBanner {

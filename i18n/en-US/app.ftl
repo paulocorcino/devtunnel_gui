@@ -141,6 +141,12 @@ update-banner-body = Version { $version } is available — you're on an older bu
 btn-update-download = View release
 btn-update-ignore = Ignore
 
+## Crash report banner
+crash-banner-title = TunnelDeck closed unexpectedly
+crash-banner-body = The last session ended in a crash. You can file it on GitHub — the report opens in your browser so you can review it before submitting.
+btn-crash-report = Report on GitHub
+btn-crash-dismiss = Dismiss
+
 ## Install CLI progress / outcome
 install-status-running = Installing…
 install-status-done = Dev Tunnels CLI installed

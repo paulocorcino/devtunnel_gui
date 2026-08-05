@@ -3,6 +3,7 @@
 
 #[cfg(windows)]
 mod autostart;
+mod crash;
 mod devtunnel;
 mod headless;
 mod host;
@@ -166,6 +167,16 @@ fn main() -> anyhow::Result<()> {
     // problems) and our crate to `info`. Override with RUST_LOG when debugging
     // (e.g. `RUST_LOG=devtunnel_gui=debug,tunnels=info`).
     let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=info,tunnels=warn").install();
+
+    // Capture panics to disk before anything else can panic. A Rust panic is not
+    // a Windows crash (the process just exits 101), so without this hook a panic
+    // is invisible everywhere — including the Store's health report. The next
+    // start surfaces the report and offers to file it on GitHub.
+    crash::install_hook();
+    // Test hook: force a panic to exercise the capture + report flow end to end.
+    if std::env::var_os("DEVTUNNEL_TEST_PANIC").is_some() {
+        panic!("forced test panic (DEVTUNNEL_TEST_PANIC)");
+    }
 
     // Headless host runner: a diagnostic/test entrypoint (no GUI, no tray) for
     // the blackbox E2E resilience harness in `tests/e2e/`. When
@@ -358,6 +369,41 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // ---- Crash report: surface the previous session's panic, if any ----
+    // Consumed once (the file is cleared on read), so the banner is raised for
+    // exactly one start per crash. Nothing is sent anywhere until the user
+    // clicks "Report on GitHub".
+    let pending_crash: Rc<RefCell<Option<crash::CrashReport>>> =
+        Rc::new(RefCell::new(crash::take_pending()));
+    if let Some(report) = pending_crash.borrow().as_ref() {
+        log::warn!(
+            "crash: previous session panicked at {} — {}",
+            report.location,
+            report.message
+        );
+        app.set_crash_report_available(true);
+    }
+    {
+        let weak = app.as_weak();
+        let pending_crash = pending_crash.clone();
+        app.on_report_crash(move || {
+            if let Some(report) = pending_crash.borrow().as_ref() {
+                open_browser(&crash::issue_url(report));
+            }
+            if let Some(a) = weak.upgrade() {
+                a.set_crash_report_available(false);
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_dismiss_crash(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_crash_report_available(false);
+            }
+        });
+    }
+
     // ---- Settings: probe interval + default expiration (issue #6) ----
     // Seed the dialog properties from the persisted settings; the handlers
     // persist edits and (hosting build) re-target the live probe immediately.
@@ -1249,7 +1295,10 @@ fn main() -> anyhow::Result<()> {
     // Use the "until quit" variant so the app stays alive when the (only) window
     // is hidden to the tray — otherwise Slint's quit-on-last-window-closed would
     // terminate the whole process the moment the window is closed/hidden.
-    if std::env::var_os("DEVTUNNEL_SHOW_ON_START").is_some() {
+    // A pending crash report is the one thing worth breaking the start-hidden
+    // rule for: the banner is the only place the user learns the app died, and
+    // a report nobody sees is a report nobody files.
+    if std::env::var_os("DEVTUNNEL_SHOW_ON_START").is_some() || app.get_crash_report_available() {
         let _ = app.show();
     }
     slint::run_event_loop_until_quit()?;
@@ -1850,6 +1899,12 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_update_banner_title(loc.t("update-banner-title").into());
     s.set_btn_update_download(loc.t("btn-update-download").into());
     s.set_btn_update_ignore(loc.t("btn-update-ignore").into());
+
+    // Crash report banner
+    s.set_crash_banner_title(loc.t("crash-banner-title").into());
+    s.set_crash_banner_body(loc.t("crash-banner-body").into());
+    s.set_btn_crash_report(loc.t("btn-crash-report").into());
+    s.set_btn_crash_dismiss(loc.t("btn-crash-dismiss").into());
 
     s.set_install_status_running(loc.t("install-status-running").into());
     s.set_install_status_done(loc.t("install-status-done").into());

@@ -93,6 +93,15 @@ slint-build = "1.13"
 ico = "0.3"
 winresource = "0.1"
 
+# Line tables in the shipped build. Costs nothing at runtime and does not enter
+# the package (MSVC emits a separate .pdb, and the MSIX layout copies only the
+# .exe), but it is what makes a captured panic backtrace name real functions and
+# lines — both in our own crash reports (src/crash.rs) and when symbolizing a
+# Partner Center crash dump. Keep the .pdb of every published build: a dump only
+# symbolizes against the .pdb of the exact binary that produced it.
+[profile.release]
+debug = 1
+
 # Profiling build: release-grade optimization with full debug symbols so a
 # sampler (samply) shows readable stacks and blocked-thread info. Build with:
 #   cargo build --features hosting --profile profiling
