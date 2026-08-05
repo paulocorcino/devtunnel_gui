@@ -1,4 +1,4 @@
-# DevTunnel GUI — English (en-US)
+# TunnelDeck — English (en-US)
 
 ## Status bar
 status-loading = loading…
@@ -92,11 +92,8 @@ req-title = Requirements
 req-cli = Dev Tunnels CLI installed
 req-login = Signed in
 req-login-as = Signed in as
-req-installed = Installed in your programs folder
-req-shortcut = Start-menu shortcut created
 req-autostart = Starts with Windows
 btn-install-cli = Install CLI
-req-install-hint = Turning on "Start with Windows" installs the app into your user programs folder, adds a Start-menu shortcut, and enables auto-start.
 
 ## Settings
 settings-title = Settings
@@ -115,7 +112,7 @@ btn-close = Close
 
 ## Settings — uninstall
 btn-uninstall = Uninstall
-confirm-uninstall = Uninstall DevTunnel GUI? This removes the Start-menu shortcut, turns off start-with-Windows, deletes your saved settings, and removes the app from your programs folder.
+confirm-uninstall = Uninstall TunnelDeck? This removes the Start-menu shortcut, turns off start-with-Windows, deletes your saved settings, and removes the app from your programs folder.
 
 ## About
 about-title = About
@@ -144,6 +141,12 @@ update-banner-body = Version { $version } is available — you're on an older bu
 btn-update-download = View release
 btn-update-ignore = Ignore
 
+## Crash report banner
+crash-banner-title = TunnelDeck closed unexpectedly
+crash-banner-body = The last session ended in a crash. You can file it on GitHub — the report opens in your browser so you can review it before submitting.
+btn-crash-report = Report on GitHub
+btn-crash-dismiss = Dismiss
+
 ## Install CLI progress / outcome
 install-status-running = Installing…
 install-status-done = Dev Tunnels CLI installed
@@ -151,7 +154,7 @@ install-status-failed = Install failed: { $message }
 install-status-elevation = Install needs administrator rights — opening the manual install page
 install-status-winget-missing = winget not available — opening the manual install page
 status-signing-in = signing in…
-toast-relogin-title = DevTunnel GUI — sign-in required
+toast-relogin-title = TunnelDeck — sign-in required
 toast-relogin-body = Your Dev Tunnels sign-in expired. Open the app and click "Sign in" to re-authenticate.
 
 ## Port detail panel

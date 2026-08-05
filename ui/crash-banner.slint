@@ -1,0 +1,61 @@
+// Banner shown at the top of the window when the previous session ended in a
+// panic. Like the UpdateBanner it is gated by its own flag rather than the
+// app-state enum, so it can show while the app is otherwise ready.
+import { Theme } from "theme.slint";
+import { Strings } from "strings.slint";
+import { TxtButton } from "controls.slint";
+
+export component CrashBanner inherits Rectangle {
+    // User clicked "Report on GitHub" — Rust opens the pre-filled issue form.
+    callback report-crash();
+    // User clicked "Dismiss" — Rust just hides the banner (the report stays on
+    // disk as last-crash.json).
+    callback dismiss-crash();
+
+    background: Theme.surface;
+
+    VerticalLayout {
+        HorizontalLayout {
+            padding: Theme.pad;
+            spacing: Theme.gap;
+
+            VerticalLayout {
+                spacing: 2px;
+                alignment: center;
+                Text {
+                    text: Strings.crash-banner-title;
+                    color: Theme.down;
+                    font-size: Theme.fs-section;
+                    font-weight: 700;
+                }
+                Text {
+                    text: Strings.crash-banner-body;
+                    color: Theme.text;
+                    font-size: Theme.fs-body;
+                    wrap: word-wrap;
+                }
+            }
+
+            Rectangle { horizontal-stretch: 1; }
+
+            VerticalLayout {
+                alignment: center;
+                spacing: Theme.gap-sm;
+                TxtButton {
+                    text: Strings.btn-crash-report;
+                    primary: true;
+                    clicked => {
+                        root.report-crash();
+                    }
+                }
+                TxtButton {
+                    text: Strings.btn-crash-dismiss;
+                    clicked => {
+                        root.dismiss-crash();
+                    }
+                }
+            }
+        }
+        Rectangle { height: 1px; background: Theme.border; }
+    }
+}

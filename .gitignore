@@ -44,3 +44,4 @@ profile*.json.gz
 # E2E suite generated run artifacts (regenerated on every run, not versioned)
 tests/e2e/report.json
 tests/e2e/report.md
+tray-debug.out

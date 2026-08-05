@@ -1,12 +1,11 @@
-//! Per-user install of the portable executable.
+//! Per-user install helpers for the portable executable.
 //!
-//! The app ships as a single portable `.exe` (downloaded from CI). When the user
-//! enables "Start with Windows" while running that portable file, we copy it into
-//! the standard no-admin per-user programs folder
-//! (`%LOCALAPPDATA%\Programs\DevTunnelGUI`), create a Start-menu shortcut, point
-//! auto-start at the new location, and relaunch from there. The original portable
-//! file is left in place — the user keeps the file they downloaded. Windows-only —
-//! the rest of the app's install story is moot elsewhere.
+//! The app ships as a single portable `.exe`. Enabling "Start with Windows" no
+//! longer relocates the binary — the auto-start entry points at wherever the app
+//! currently runs from (see `autostart`). What remains here is status reporting
+//! (`is_installed`) and the uninstall teardown
+//! (`remove_shortcut`, `spawn_self_delete`). Windows-only — the rest of the app's
+//! install story is moot elsewhere.
 
 #![cfg(windows)]
 
@@ -19,10 +18,8 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// Sub-folder name under `%LOCALAPPDATA%\Programs` and the Start-menu link label.
 const APP_DIR_NAME: &str = "DevTunnelGUI";
-/// Installed executable file name.
-const EXE_NAME: &str = "devtunnel_gui.exe";
 /// Friendly name shown for the Start-menu shortcut (and its `.lnk` file stem).
-const SHORTCUT_NAME: &str = "DevTunnel GUI";
+const SHORTCUT_NAME: &str = "TunnelDeck";
 
 /// `%LOCALAPPDATA%\Programs\DevTunnelGUI` — the no-admin per-user install dir.
 pub fn programs_dir() -> Option<PathBuf> {
@@ -49,11 +46,6 @@ pub fn is_installed() -> bool {
     }
 }
 
-/// Whether the Start-menu shortcut exists on disk.
-pub fn shortcut_exists() -> bool {
-    shortcut_path().map(|p| p.exists()).unwrap_or(false)
-}
-
 /// Case-insensitive path-prefix test (Windows paths ignore case and accept either
 /// slash). The prefix is matched on a directory boundary, so a sibling dir like
 /// `DevTunnelGUI-old` does not count as living inside `DevTunnelGUI`. Pure —
@@ -66,48 +58,6 @@ fn path_starts_with(path: &Path, prefix: &Path) -> bool {
         prefix.push('\\');
     }
     path.starts_with(&prefix)
-}
-
-/// Copies the running executable into [`programs_dir`], returning the installed
-/// path. Creates the directory if needed and overwrites any prior copy. Only
-/// called when [`is_installed`] is false, so source and destination differ.
-pub fn install_self() -> Result<PathBuf> {
-    let src = std::env::current_exe().context("locating current executable")?;
-    let dir = programs_dir().context("LOCALAPPDATA is not set")?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating install dir {}", dir.display()))?;
-    let dest = dir.join(EXE_NAME);
-    std::fs::copy(&src, &dest)
-        .with_context(|| format!("copying {} -> {}", src.display(), dest.display()))?;
-    Ok(dest)
-}
-
-/// Creates (or overwrites) the Start-menu shortcut pointing at `target`, using
-/// the executable itself as the icon source.
-pub fn create_start_menu_shortcut(target: &Path) -> Result<()> {
-    let link = shortcut_path().context("APPDATA is not set")?;
-    if let Some(parent) = link.parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
-    let mut sl = mslnk::ShellLink::new(target)
-        .with_context(|| format!("preparing shortcut for {}", target.display()))?;
-    sl.set_name(Some(SHORTCUT_NAME.to_string()));
-    sl.set_icon_location(Some(target.to_string_lossy().to_string()));
-    if let Some(dir) = target.parent() {
-        sl.set_working_dir(Some(dir.to_string_lossy().to_string()));
-    }
-    sl.create_lnk(&link)
-        .with_context(|| format!("writing shortcut {}", link.display()))?;
-    Ok(())
-}
-
-/// Relaunches the freshly installed copy at `new_exe`. The caller exits after this
-/// returns Ok. The portable original is left untouched.
-pub fn relaunch_installed(new_exe: &Path) -> Result<()> {
-    std::process::Command::new(new_exe)
-        .spawn()
-        .with_context(|| format!("relaunching {}", new_exe.display()))?;
-    Ok(())
 }
 
 /// Deletes the Start-menu shortcut if it exists. A missing shortcut counts as

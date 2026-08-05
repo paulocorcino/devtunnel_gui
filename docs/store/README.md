@@ -119,6 +119,29 @@ In Partner Center, on the reserved product:
    likely notes here are name/trademark or the CLI dependency; address and
    resubmit.
 
+## Diagnosing failures reported by the Store
+
+Partner Center's **Health → Failures** report lists crashes collected by Windows
+Error Reporting. Two things are needed to make it readable, because by default
+every entry lands under "Uncategorized":
+
+- **Publish the symbols.** `[profile.release] debug = 1` (in `Cargo.toml`) makes
+  the release build emit `target\release\devtunnel_gui.pdb`. It is *not* part of
+  the package — `build-msix.ps1` copies only the `.exe` — so upload it with the
+  submission and **archive the `.pdb` of every published build**: a dump only
+  symbolizes against the `.pdb` of the exact binary that produced it. Without
+  this, Partner Center resolves no frame and categorizes nothing.
+- **Know what it cannot see.** A Rust panic is not a Windows crash (the process
+  exits with code 101), so it never reaches this report at all. That half is
+  covered in-app by the panic hook in [`src/crash.rs`](../../src/crash.rs), which
+  writes a report to `%APPDATA%\devtunnel-gui\` and, on the next start, offers a
+  banner that opens a pre-filled GitHub issue. Native faults (access violations)
+  are the reverse: reported to Windows, invisible to the hook — those are the
+  ones this report is for. Force the in-app flow with `DEVTUNNEL_TEST_PANIC=1`.
+
+Failure details in Partner Center also offer a **CAB download** of the minidump;
+open it in WinDbg or Visual Studio with the matching `.pdb`.
+
 ## Recurring: shipping an update
 
 1. Bump the version (e.g. `-Version 0.2.0.0`; the 4th part must stay `0`).

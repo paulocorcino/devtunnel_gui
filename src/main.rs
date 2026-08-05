@@ -3,6 +3,7 @@
 
 #[cfg(windows)]
 mod autostart;
+mod crash;
 mod devtunnel;
 mod headless;
 mod host;
@@ -31,7 +32,7 @@ use std::sync::mpsc::Sender;
 use std::time::Duration;
 use tray_icon::{
     menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
-    Icon, TrayIconBuilder, TrayIconEvent,
+    Icon, MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent,
 };
 
 /// A data-load result pumped from a background thread to the UI thread:
@@ -167,6 +168,16 @@ fn main() -> anyhow::Result<()> {
     // (e.g. `RUST_LOG=devtunnel_gui=debug,tunnels=info`).
     let _ = logbuf::CaptureLogger::from_env("devtunnel_gui=info,tunnels=warn").install();
 
+    // Capture panics to disk before anything else can panic. A Rust panic is not
+    // a Windows crash (the process just exits 101), so without this hook a panic
+    // is invisible everywhere — including the Store's health report. The next
+    // start surfaces the report and offers to file it on GitHub.
+    crash::install_hook();
+    // Test hook: force a panic to exercise the capture + report flow end to end.
+    if std::env::var_os("DEVTUNNEL_TEST_PANIC").is_some() {
+        panic!("forced test panic (DEVTUNNEL_TEST_PANIC)");
+    }
+
     // Headless host runner: a diagnostic/test entrypoint (no GUI, no tray) for
     // the blackbox E2E resilience harness in `tests/e2e/`. When
     // `DEVTUNNEL_HEADLESS_HOST=<id>[,<id>…]` is set we drive the production host
@@ -200,7 +211,13 @@ fn main() -> anyhow::Result<()> {
     let tray = Rc::new(
         TrayIconBuilder::new()
             .with_menu(Box::new(menu))
-            .with_tooltip("DevTunnel GUI")
+            // Left-click is reserved for toggling the window. If the menu also
+            // opened on left-click (the crate default), that same click would
+            // queue a `Click` event that the toggle handler processes right
+            // after the menu's "Open window" — showing the window and then
+            // immediately hiding it. The context menu opens on right-click only.
+            .with_menu_on_left_click(false)
+            .with_tooltip(loc.t("app-title"))
             .with_icon(build_icon())
             .build()?,
     );
@@ -209,6 +226,7 @@ fn main() -> anyhow::Result<()> {
     {
         let weak = app.as_weak();
         app.window().on_close_requested(move || {
+            log::debug!("window: close requested -> hide to tray");
             if let Some(a) = weak.upgrade() {
                 let _ = a.hide();
             }
@@ -287,10 +305,9 @@ fn main() -> anyhow::Result<()> {
             #[cfg(windows)]
             {
                 if enabled {
+                    // Registers the Run entry at the executable's current
+                    // location; it does not relocate the binary or relaunch.
                     enable_auto_start(&app_state);
-                    // `enable_auto_start` exits the process when it relocates a
-                    // portable install, so reaching here means we either were
-                    // already installed or the relocation could not hand off.
                 } else if let Err(e) = autostart::disable() {
                     log::warn!("autostart: failed to disable: {e}");
                 }
@@ -352,6 +369,41 @@ fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // ---- Crash report: surface the previous session's panic, if any ----
+    // Consumed once (the file is cleared on read), so the banner is raised for
+    // exactly one start per crash. Nothing is sent anywhere until the user
+    // clicks "Report on GitHub".
+    let pending_crash: Rc<RefCell<Option<crash::CrashReport>>> =
+        Rc::new(RefCell::new(crash::take_pending()));
+    if let Some(report) = pending_crash.borrow().as_ref() {
+        log::warn!(
+            "crash: previous session panicked at {} — {}",
+            report.location,
+            report.message
+        );
+        app.set_crash_report_available(true);
+    }
+    {
+        let weak = app.as_weak();
+        let pending_crash = pending_crash.clone();
+        app.on_report_crash(move || {
+            if let Some(report) = pending_crash.borrow().as_ref() {
+                open_browser(&crash::issue_url(report));
+            }
+            if let Some(a) = weak.upgrade() {
+                a.set_crash_report_available(false);
+            }
+        });
+    }
+    {
+        let weak = app.as_weak();
+        app.on_dismiss_crash(move || {
+            if let Some(a) = weak.upgrade() {
+                a.set_crash_report_available(false);
+            }
+        });
+    }
+
     // ---- Settings: probe interval + default expiration (issue #6) ----
     // Seed the dialog properties from the persisted settings; the handlers
     // persist edits and (hosting build) re-target the live probe immediately.
@@ -846,7 +898,10 @@ fn main() -> anyhow::Result<()> {
                 // Tray menu clicks.
                 while let Ok(ev) = menu_rx.try_recv() {
                     match actions.borrow().get(&ev.id) {
-                        Some(Action::Show) => show_window(&weak),
+                        Some(Action::Show) => {
+                            log::debug!("tray: menu 'Open window' clicked");
+                            show_window(&weak);
+                        }
                         Some(Action::Quit) => {
                             let _ = slint::quit_event_loop();
                         }
@@ -855,10 +910,23 @@ fn main() -> anyhow::Result<()> {
                         None => {}
                     }
                 }
-                // Tray icon click: toggle the window.
+                // Tray icon click: toggle the window. A single physical click
+                // emits both a `Down` and an `Up` event — toggling on each would
+                // show and immediately hide the window, so only `Up` counts.
+                // Right-click belongs to the context menu, never to the toggle.
                 while let Ok(ev) = tray_rx.try_recv() {
-                    if let TrayIconEvent::Click { .. } = ev {
-                        toggle_window(&weak);
+                    if let TrayIconEvent::Click {
+                        button,
+                        button_state,
+                        ..
+                    } = ev
+                    {
+                        log::debug!("tray: click button={button:?} state={button_state:?}");
+                        if button == MouseButton::Left
+                            && button_state == MouseButtonState::Up
+                        {
+                            toggle_window(&weak);
+                        }
                     }
                 }
                 // A newer GitHub release was found -> show the update banner,
@@ -1227,7 +1295,10 @@ fn main() -> anyhow::Result<()> {
     // Use the "until quit" variant so the app stays alive when the (only) window
     // is hidden to the tray — otherwise Slint's quit-on-last-window-closed would
     // terminate the whole process the moment the window is closed/hidden.
-    if std::env::var_os("DEVTUNNEL_SHOW_ON_START").is_some() {
+    // A pending crash report is the one thing worth breaking the start-hidden
+    // rule for: the banner is the only place the user learns the app died, and
+    // a report nobody sees is a report nobody files.
+    if std::env::var_os("DEVTUNNEL_SHOW_ON_START").is_some() || app.get_crash_report_available() {
         let _ = app.show();
     }
     slint::run_event_loop_until_quit()?;
@@ -1243,54 +1314,22 @@ fn refresh_requirements(app: &AppWindow) {
     app.set_req_cli_ok(app_state != "cli-missing");
     app.set_req_login_ok(app_state == "ready");
     app.set_req_installed_ok(install::is_installed());
-    app.set_req_shortcut_ok(install::shortcut_exists());
     app.set_req_autostart_ok(autostart::is_enabled());
 }
 
-/// Enables "Start with Windows", performing the full per-user install when the
-/// app is running as a portable executable: relocate into `%LOCALAPPDATA%\
-/// Programs`, create the Start-menu shortcut, register auto-start at the new
-/// path, then relaunch from there and exit (the fresh instance deletes the
-/// portable original). When already installed, just (re)writes the Run entry and
-/// ensures the shortcut exists.
+/// Enables "Start with Windows" by registering the auto-start Run entry at the
+/// executable's *current* location. It does not relocate the binary or relaunch:
+/// wherever the app runs from today is the path Windows will start at logon.
 #[cfg(windows)]
-fn enable_auto_start(app_state: &Rc<RefCell<state::AppState>>) {
-    if install::is_installed() {
-        if let Ok(exe) = std::env::current_exe() {
+fn enable_auto_start(_app_state: &Rc<RefCell<state::AppState>>) {
+    match std::env::current_exe() {
+        Ok(exe) => {
             if let Err(e) = autostart::enable_at(&exe) {
                 log::warn!("autostart: failed to set Run entry: {e}");
             }
-            if let Err(e) = install::create_start_menu_shortcut(&exe) {
-                log::warn!("install: failed to create shortcut: {e}");
-            }
         }
-        return;
+        Err(e) => log::warn!("autostart: failed to resolve current executable: {e}"),
     }
-
-    // Portable: move into the programs folder and hand off to the new copy.
-    let new_exe = match install::install_self() {
-        Ok(p) => p,
-        Err(e) => {
-            log::warn!("install: relocation failed: {e}");
-            return;
-        }
-    };
-    if let Err(e) = install::create_start_menu_shortcut(&new_exe) {
-        log::warn!("install: failed to create shortcut: {e}");
-    }
-    if let Err(e) = autostart::enable_at(&new_exe) {
-        log::warn!("autostart: failed to set Run entry: {e}");
-    }
-    // Persist the enabled state before relaunching so the fresh instance reflects it.
-    {
-        let mut st = app_state.borrow_mut();
-        st.settings.auto_start = true;
-        st.save();
-    }
-    if install::relaunch_installed(&new_exe).is_ok() {
-        std::process::exit(0);
-    }
-    log::warn!("install: relaunch from new location failed; staying in place");
 }
 
 /// Uninstalls the app: removes the Start-menu shortcut, disables start-with-
@@ -1375,19 +1414,47 @@ fn expiration_string(days: i32) -> String {
 
 fn show_window(weak: &slint::Weak<AppWindow>) {
     if let Some(a) = weak.upgrade() {
+        log::debug!("window: show (was_visible={})", a.window().is_visible());
         let _ = a.show();
         a.window().set_minimized(false);
+        bring_to_front(a.window());
     }
 }
 
 fn toggle_window(weak: &slint::Weak<AppWindow>) {
     if let Some(a) = weak.upgrade() {
         if a.window().is_visible() {
+            log::debug!("window: toggle -> hide");
             let _ = a.hide();
         } else {
+            log::debug!("window: toggle -> show");
             let _ = a.show();
             a.window().set_minimized(false);
+            bring_to_front(a.window());
         }
+    }
+}
+
+/// Raises the window above the tray's own foreground window and activates it.
+///
+/// `tray-icon` calls `SetForegroundWindow` on its hidden `WS_EX_NOACTIVATE`
+/// helper window before popping up the context menu, so after "Open window" the
+/// foreground belongs to that invisible window: `show()` maps our window but it
+/// stays behind whatever the user was looking at, which reads as "nothing
+/// happened". Left-clicking the tray icon never pops the menu, which is why that
+/// path appeared to work. `focus_window()` performs the Win32 activation dance
+/// (winit attaches to the foreground thread's input queue), and since our process
+/// already owns the foreground the request is granted.
+fn bring_to_front(window: &slint::Window) {
+    use slint::winit_030::WinitWindowAccessor;
+    let raised = window
+        .with_winit_window(|w| {
+            w.set_minimized(false);
+            w.focus_window();
+        })
+        .is_some();
+    if !raised {
+        log::debug!("window: bring_to_front skipped (no winit window yet)");
     }
 }
 
@@ -1833,6 +1900,12 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_btn_update_download(loc.t("btn-update-download").into());
     s.set_btn_update_ignore(loc.t("btn-update-ignore").into());
 
+    // Crash report banner
+    s.set_crash_banner_title(loc.t("crash-banner-title").into());
+    s.set_crash_banner_body(loc.t("crash-banner-body").into());
+    s.set_btn_crash_report(loc.t("btn-crash-report").into());
+    s.set_btn_crash_dismiss(loc.t("btn-crash-dismiss").into());
+
     s.set_install_status_running(loc.t("install-status-running").into());
     s.set_install_status_done(loc.t("install-status-done").into());
     s.set_install_status_elevation(loc.t("install-status-elevation").into());
@@ -1856,11 +1929,8 @@ fn apply_strings(app: &AppWindow, loc: &Locale) {
     s.set_req_cli(loc.t("req-cli").into());
     s.set_req_login(loc.t("req-login").into());
     s.set_req_login_as(loc.t("req-login-as").into());
-    s.set_req_installed(loc.t("req-installed").into());
-    s.set_req_shortcut(loc.t("req-shortcut").into());
     s.set_req_autostart(loc.t("req-autostart").into());
     s.set_btn_install_cli(loc.t("btn-install-cli").into());
-    s.set_req_install_hint(loc.t("req-install-hint").into());
 
     // Settings
     s.set_settings_title(loc.t("settings-title").into());

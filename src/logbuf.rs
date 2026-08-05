@@ -59,6 +59,19 @@ impl Ring {
 
 static RING: Mutex<Ring> = Mutex::new(Ring::new(CAPACITY));
 
+/// How many recent Warn/Error records are kept as crash context.
+const CRASH_CONTEXT_CAPACITY: usize = 50;
+
+/// A second, much smaller ring holding only Warn/Error records, attached to
+/// panic reports (see `crash.rs`) as "what the app was complaining about right
+/// before it died".
+///
+/// Separate from [`RING`] on purpose: the Logs-tab ring is fed by every enabled
+/// record — including the relay's per-connection chatter, whose volume is what
+/// made capture a stability problem in v0.1.0. Warn/Error is rare enough that
+/// this lock is never hot.
+static CRASH_RING: Mutex<Ring> = Mutex::new(Ring::new(CRASH_CONTEXT_CAPACITY));
+
 /// Bounded, non-blocking sink to a dedicated stderr writer thread.
 ///
 /// Teeing every record straight to stderr with `eprintln!` was a multi-day
@@ -107,6 +120,18 @@ pub fn push(level: Level, line: String) {
     RING.lock()
         .unwrap_or_else(|e| e.into_inner())
         .push(Entry { level, line });
+}
+
+/// Snapshots the recent Warn/Error records, oldest first, for a crash report.
+///
+/// Uses `try_lock`: the caller is a panic hook, which may run on the very thread
+/// that was holding the lock. Losing the context is acceptable; deadlocking the
+/// dying process while it writes its report is not.
+pub fn crash_context() -> Vec<String> {
+    CRASH_RING
+        .try_lock()
+        .map(|ring| ring.snapshot(LevelFilter::Warn))
+        .unwrap_or_default()
 }
 
 /// Snapshots the process-wide ring buffer (lines at or above `min` severity,
@@ -211,6 +236,17 @@ impl Log for CaptureLogger {
         let message = record.args().to_string();
         // Technical/diagnostic content — intentionally not localized.
         let line = format!("{:<5} {} — {}", record.level(), record.target(), message);
+        // Keep problems (and only problems) as crash context. `try_lock` so a
+        // logging thread never blocks on it; a dropped context line is cheaper
+        // than a stalled UI.
+        if record.level() <= Level::Warn {
+            if let Ok(mut ring) = CRASH_RING.try_lock() {
+                ring.push(Entry {
+                    level: record.level(),
+                    line: line.clone(),
+                });
+            }
+        }
         // Hand the line to the writer thread without ever blocking: a full
         // channel (paused/stuck console) drops the line instead of stalling this
         // — possibly the UI — thread. See `SINK` for why this matters.
@@ -288,6 +324,21 @@ mod tests {
         assert!(snapshot(LevelFilter::Info)
             .iter()
             .any(|l| l == "hello from test"));
+    }
+
+    #[test]
+    fn crash_context_keeps_only_problems() {
+        // Feed the crash ring the way `log()` does, then check the filter.
+        {
+            let mut ring = CRASH_RING.lock().unwrap();
+            ring.push(entry(Level::Error, "boom"));
+            ring.push(entry(Level::Warn, "careful"));
+            ring.push(entry(Level::Info, "chatter"));
+        }
+        let ctx = crash_context();
+        assert!(ctx.contains(&"boom".to_string()));
+        assert!(ctx.contains(&"careful".to_string()));
+        assert!(!ctx.contains(&"chatter".to_string()));
     }
 
     #[test]

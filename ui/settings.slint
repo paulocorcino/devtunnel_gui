@@ -85,7 +85,6 @@ export component SettingsDialog inherits Rectangle {
     // Logged-in account (e.g. an email); empty when logged out or not yet fetched.
     in property <string> req-login-account;
     in property <bool> req-installed-ok;
-    in property <bool> req-shortcut-ok;
     in property <bool> req-autostart-ok;
     // True while the CLI install (winget) is running — disables the Install CLI
     // button and swaps its label for "Installing…", matching the banner.
@@ -217,9 +216,9 @@ export component SettingsDialog inherits Rectangle {
                 // -- General --
                 if root.section == 0 : VerticalLayout {
                     spacing: Theme.gap;
-                    // Auto-start is managed by the MSIX package (windows.startupTask,
-                    // toggled in Windows Settings) in Store builds, so hide this toggle there.
-                    if !Strings.store-build: Check {
+                    // Registers an HKCU Run entry pointing at the current
+                    // executable — no relocation. Shown in all builds.
+                    Check {
                         text: Strings.field-auto-start;
                         checked <=> root.auto-start;
                         toggled(on) => {
@@ -294,28 +293,14 @@ export component SettingsDialog inherits Rectangle {
                             }
                         }
                     }
-                    // Install / shortcut / auto-start state and the uninstall action
-                    // only apply to the portable build. In Store builds the MSIX
-                    // package owns install and removal, so hide this whole block.
-                    if !Strings.store-build: ReqRow {
-                        ok: root.req-installed-ok;
-                        label: Strings.req-installed;
-                    }
-                    if !Strings.store-build: ReqRow {
-                        ok: root.req-shortcut-ok;
-                        label: Strings.req-shortcut;
-                    }
-                    if !Strings.store-build: ReqRow {
+                    // Auto-start status applies to all builds now (an HKCU Run
+                    // entry, no relocation).
+                    ReqRow {
                         ok: root.req-autostart-ok;
                         label: Strings.req-autostart;
                     }
-                    if !Strings.store-build: Text {
-                        text: Strings.req-install-hint;
-                        color: Theme.muted;
-                        font-size: Theme.fs-caption;
-                        wrap: word-wrap;
-                    }
-                    // Danger zone: uninstall (only meaningful once installed).
+                    // Danger zone: uninstall (only meaningful for an app copy that
+                    // was relocated into the programs folder under the old model).
                     if !Strings.store-build && root.req-installed-ok: Rectangle {
                         height: 1px;
                         background: Theme.border;

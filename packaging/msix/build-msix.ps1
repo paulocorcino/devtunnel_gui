@@ -152,7 +152,10 @@ if (Test-Path $layout) { Remove-Item $layout -Recurse -Force }
 New-Item -ItemType Directory -Path $layout | Out-Null
 New-Item -ItemType Directory -Path $outDir -Force | Out-Null
 
-Copy-Item $exe (Join-Path $layout "devtunnel_gui.exe")
+# Ship the executable as tunneldeck.exe inside the package (the process name and
+# the file the Store manifest launches). The cargo bin is still built as
+# devtunnel_gui.exe; we rename it here on copy.
+Copy-Item $exe (Join-Path $layout "tunneldeck.exe")
 Copy-Item (Join-Path $scriptDir "Assets") (Join-Path $layout "Assets") -Recurse
 
 # Substitute the Partner Center identity values into the manifest.
